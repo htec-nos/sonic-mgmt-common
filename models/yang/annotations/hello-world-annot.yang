@@ -1,0 +1,18 @@
+module hello-world-annot {
+    yang-version 1.1;
+    namespace "http://example.com/yang/hello-world-annot";
+    prefix "hello-annot";
+    import hello-world {
+        prefix hello;
+    }
+
+    import sonic-extensions {
+        prefix sonic-ext;
+    }
+
+    deviation /hello:greeting {
+        deviate add {
+            sonic-ext:subtree-transformer "hello_world_greeting_xfmr";
+        }
+    }
+}

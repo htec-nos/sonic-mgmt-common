@@ -1,0 +1,38 @@
+module hello-world {
+  namespace "http://example.com/yang/hello-world";
+  prefix "hello";
+
+  revision "2025-01-01" {
+    description "Initial revision";
+  }
+
+  container greeting {
+    description "Hello world greeting container";
+
+    leaf message {
+      type string;
+      description "Greeting message";
+    }
+
+    leaf timestamp {
+      type string;
+      description "Timestamp of greeting";
+    }
+  }
+
+  rpc say-hello {
+    description "RPC operation to say hello";
+    input {
+      leaf name {
+        type string;
+        description "Name to greet";
+      }
+    }
+    output {
+      leaf response {
+        type string;
+        description "Hello response";
+      }
+    }
+  }
+}

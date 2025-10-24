@@ -11,3 +11,5 @@ openconfig-if-aggregate.yang
 openconfig-mclag.yang
 openconfig-mclag-annot.yang
 openconfig-vlan.yang
+hello-world.yang
+hello-world-annot.yang
