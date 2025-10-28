@@ -92,7 +92,6 @@ func (app *BgpApp) translateAction(dbs [db.MaxDB]*db.DB) error {
 	return tlerr.NotSupported("unsupported")
 }
 
-// ADD THESE MISSING METHODS
 func (app *BgpApp) translateSubscribe(req translateSubRequest) (translateSubResponse, error) {
 	return emptySubscribeResponse(req.path)
 }
