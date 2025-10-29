@@ -68,19 +68,19 @@ func (app *BgpApp) getAppRootObject() *ocbinds.OpenconfigBgp_Bgp {
 }
 
 func (app *BgpApp) translateCreate(d *db.DB) ([]db.WatchKeys, error) {
-	return app.translateCRUCommon(d, CREATE)
-}
-
-func (app *BgpApp) translateUpdate(d *db.DB) ([]db.WatchKeys, error) {
-	return app.translateCRUCommon(d, UPDATE)
+	return app.translateCRUDCommon(d, CREATE)
 }
 
 func (app *BgpApp) translateReplace(d *db.DB) ([]db.WatchKeys, error) {
-	return app.translateCRUCommon(d, REPLACE)
+	return app.translateCRUDCommon(d, REPLACE)
+}
+
+func (app *BgpApp) translateUpdate(d *db.DB) ([]db.WatchKeys, error) {
+	return app.translateCRUDCommon(d, UPDATE)
 }
 
 func (app *BgpApp) translateDelete(d *db.DB) ([]db.WatchKeys, error) {
-	return nil, nil
+	return app.translateCRUDCommon(d, DELETE)
 }
 
 func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
@@ -161,12 +161,12 @@ func (app *BgpApp) processAction(dbs [db.MaxDB]*db.DB) (ActionResponse, error) {
 	return ActionResponse{}, tlerr.New("not implemented")
 }
 
-func (app *BgpApp) translateCRUCommon(d *db.DB, opcode int) ([]db.WatchKeys, error) {
+func (app *BgpApp) translateCRUDCommon(d *db.DB, opcode int) ([]db.WatchKeys, error) {
 	var err error
 	var keys []db.WatchKeys
-	log.Info("translateCRUCommon:bgp:path =", app.pathInfo.Template)
+	log.Info("translateCRUDCommon:bgp:path =", app.pathInfo.Template)
 
-	app.convertOCBgpGlobalsToInternal()
+	app.convertOCBgpGlobalsToInternal(opcode)
 
 	return keys, err
 }
@@ -181,10 +181,8 @@ func (app *BgpApp) processCommon(d *db.DB, opcode int) error {
 		vrfName := "default"
 
 		switch opcode {
-		case CREATE, REPLACE, UPDATE:
+		case CREATE, REPLACE, UPDATE, DELETE:
 			err = app.setBgpGlobalsDataInConfigDb(d, opcode)
-		case DELETE:
-			err = d.DeleteEntry(app.bgpGlobalsTs, db.Key{Comp: []string{vrfName}})
 		case GET:
 			err = app.convertDBBgpGlobalsToInternal(d, db.Key{Comp: []string{vrfName}})
 			if err != nil {
@@ -193,6 +191,8 @@ func (app *BgpApp) processCommon(d *db.DB, opcode int) error {
 			ygot.BuildEmptyTree(bgp.Global)
 			app.convertInternalToOCBgpGlobals(vrfName, bgp.Global)
 		}
+	} else {
+		return tlerr.NotSupported("Path not supported")
 	}
 
 	return err
@@ -215,20 +215,22 @@ func (app *BgpApp) setBgpGlobalsDataInConfigDb(d *db.DB, opcode int) error {
 				return tlerr.AlreadyExists("BGP global configuration already exists")
 			}
 			err = d.CreateEntry(app.bgpGlobalsTs, k, value)
-
 		case REPLACE:
 			if existingEntry.IsPopulated() {
 				err = d.ModEntry(app.bgpGlobalsTs, k, value)
 			} else {
 				err = d.CreateEntry(app.bgpGlobalsTs, k, value)
 			}
-
 		case UPDATE:
 			if !existingEntry.IsPopulated() {
 				return tlerr.NotFound("BGP global configuration not found")
 			}
 			err = d.ModEntry(app.bgpGlobalsTs, k, value)
-
+		case DELETE:
+			if !existingEntry.IsPopulated() {
+				return tlerr.NotFound("BGP global configuration not found")
+			}
+			err = d.DeleteEntry(app.bgpGlobalsTs, k)
 		default:
 			return fmt.Errorf("unsupported opcode %d", opcode)
 		}
@@ -240,10 +242,19 @@ func (app *BgpApp) setBgpGlobalsDataInConfigDb(d *db.DB, opcode int) error {
 	return nil
 }
 
-func (app *BgpApp) convertOCBgpGlobalsToInternal() {
+func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) {
+	vrfName := "default"
+
+	if opcode == DELETE {
+		// For DELETE, just populate the map with the VRF key
+		// No need to read from YANG payload since DELETE has no payload
+		app.bgpGlobalsMap = make(map[string]db.Value)
+		app.bgpGlobalsMap[vrfName] = db.Value{Field: map[string]string{}}
+		return
+	}
+
 	bgp := app.getAppRootObject()
 	if bgp != nil && bgp.Global != nil {
-		vrfName := "default"
 		app.bgpGlobalsMap[vrfName] = db.Value{Field: map[string]string{}}
 
 		if bgp.Global.Config != nil {
