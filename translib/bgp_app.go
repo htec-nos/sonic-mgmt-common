@@ -259,7 +259,7 @@ func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) {
 
 		if bgp.Global.Config != nil {
 			if bgp.Global.Config.As != nil {
-				app.bgpGlobalsMap[vrfName].Field["asn"] = fmt.Sprint(*bgp.Global.Config.As)
+				app.bgpGlobalsMap[vrfName].Field["local_asn"] = fmt.Sprint(*bgp.Global.Config.As)
 			}
 			if bgp.Global.Config.RouterId != nil {
 				app.bgpGlobalsMap[vrfName].Field["router_id"] = *bgp.Global.Config.RouterId
@@ -291,7 +291,7 @@ func (app *BgpApp) convertInternalToOCBgpGlobals(vrfName string, global *ocbinds
 			global.State = &ocbinds.OpenconfigBgp_Bgp_Global_State{}
 		}
 
-		if asn := data.Get("asn"); asn != "" {
+		if asn := data.Get("local_asn"); asn != "" {
 			if asnVal, err := strconv.ParseUint(asn, 10, 32); err == nil {
 				asnVal32 := uint32(asnVal)
 				global.Config.As = &asnVal32

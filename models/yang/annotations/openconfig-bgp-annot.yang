@@ -17,7 +17,7 @@ module openconfig-bgp-annot {
 
     deviation /oc-bgp:bgp/oc-bgp:global/oc-bgp:config/oc-bgp:as {
         deviate add {
-            sonic-ext:field-name "asn";
+            sonic-ext:field-name "local_asn";
         }
     }
 
@@ -29,7 +29,7 @@ module openconfig-bgp-annot {
 
     deviation /oc-bgp:bgp/oc-bgp:global/oc-bgp:state/oc-bgp:as {
         deviate add {
-            sonic-ext:field-name "asn";
+            sonic-ext:field-name "local_asn";
         }
     }
 
