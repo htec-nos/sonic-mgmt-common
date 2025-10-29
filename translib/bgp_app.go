@@ -181,12 +181,8 @@ func (app *BgpApp) processCommon(d *db.DB, opcode int) error {
 		vrfName := "default"
 
 		switch opcode {
-		case CREATE:
-			err = app.setBgpGlobalsDataInConfigDb(d, true)
-		case REPLACE:
-			err = app.setBgpGlobalsDataInConfigDb(d, true)
-		case UPDATE:
-			err = app.setBgpGlobalsDataInConfigDb(d, false)
+		case CREATE, REPLACE, UPDATE:
+			err = app.setBgpGlobalsDataInConfigDb(d, opcode)
 		case DELETE:
 			err = d.DeleteEntry(app.bgpGlobalsTs, db.Key{Comp: []string{vrfName}})
 		case GET:
@@ -200,6 +196,48 @@ func (app *BgpApp) processCommon(d *db.DB, opcode int) error {
 	}
 
 	return err
+}
+
+func (app *BgpApp) setBgpGlobalsDataInConfigDb(d *db.DB, opcode int) error {
+	for key, value := range app.bgpGlobalsMap {
+		k := db.Key{Comp: []string{key}}
+		existingEntry, getErr := d.GetEntry(app.bgpGlobalsTs, k)
+
+		// Return error if GetEntry fails for reasons other than not found
+		if getErr != nil && !isNotFoundError(getErr) {
+			return getErr
+		}
+
+		var err error
+		switch opcode {
+		case CREATE:
+			if existingEntry.IsPopulated() {
+				return tlerr.AlreadyExists("BGP global configuration already exists")
+			}
+			err = d.CreateEntry(app.bgpGlobalsTs, k, value)
+
+		case REPLACE:
+			if existingEntry.IsPopulated() {
+				err = d.ModEntry(app.bgpGlobalsTs, k, value)
+			} else {
+				err = d.CreateEntry(app.bgpGlobalsTs, k, value)
+			}
+
+		case UPDATE:
+			if !existingEntry.IsPopulated() {
+				return tlerr.NotFound("BGP global configuration not found")
+			}
+			err = d.ModEntry(app.bgpGlobalsTs, k, value)
+
+		default:
+			return fmt.Errorf("unsupported opcode %d", opcode)
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (app *BgpApp) convertOCBgpGlobalsToInternal() {
@@ -256,26 +294,4 @@ func (app *BgpApp) convertInternalToOCBgpGlobals(vrfName string, global *ocbinds
 			global.State.RouterId = &routerId
 		}
 	}
-}
-
-func (app *BgpApp) setBgpGlobalsDataInConfigDb(d *db.DB, createFlag bool) error {
-	var err error
-	for key := range app.bgpGlobalsMap {
-		existingEntry, err := d.GetEntry(app.bgpGlobalsTs, db.Key{Comp: []string{key}})
-
-		if createFlag && existingEntry.IsPopulated() {
-			return tlerr.AlreadyExists("BGP global configuration already exists")
-		}
-
-		if createFlag || (!createFlag && err != nil && !existingEntry.IsPopulated()) {
-			err = d.CreateEntry(app.bgpGlobalsTs, db.Key{Comp: []string{key}}, app.bgpGlobalsMap[key])
-		} else {
-			err = d.ModEntry(app.bgpGlobalsTs, db.Key{Comp: []string{key}}, app.bgpGlobalsMap[key])
-		}
-
-		if err != nil {
-			return err
-		}
-	}
-	return err
 }
