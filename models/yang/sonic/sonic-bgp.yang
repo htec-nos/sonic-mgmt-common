@@ -1,0 +1,58 @@
+module sonic-bgp {  
+    namespace "http://github.com/Azure/sonic-bgp";  
+    prefix sbgp;  
+    yang-version 1.1;  
+
+    import ietf-inet-types {
+        prefix inet;
+    }  
+
+    organization
+        "SONiC";
+
+    contact
+        "SONiC";
+
+    description
+        "SONIC BGP";
+
+    revision 2025-10-27 {
+        description
+            "Initial revision.";
+    }
+
+    container sonic-bgp {
+
+        container BGP_GLOBALS {
+
+            list BGP_GLOBALS_LIST {
+                key "vrf_name";
+
+                leaf vrf_name {
+                    type string;
+                    description
+                        "VRF name, use 'default' for default VRF";
+                }
+
+                leaf asn {
+                    type uint32;
+                    mandatory true;
+                    description
+                        "Autonomous System Number";
+                }
+
+                leaf local_asn {
+                    type uint32;
+                    description
+                        "Local Autonomous System Number";
+                }
+
+                leaf router_id {
+                    type inet:ipv4-address;
+                    description
+                        "BGP Router ID";
+                }
+            }
+        }
+    }
+}
