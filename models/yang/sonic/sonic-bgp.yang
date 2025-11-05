@@ -34,23 +34,16 @@ module sonic-bgp {
                         "VRF name, use 'default' for default VRF";
                 }
 
-                leaf asn {
-                    type uint32;
-                    mandatory true;
-                    description
-                        "Autonomous System Number";
-                }
-
                 leaf local_asn {
-                    type uint32;
-                    description
-                        "Local Autonomous System Number";
+                    type uint32 {
+                        range "1..4294967295";
+                    }
+                    description "local AS number";
                 }
 
                 leaf router_id {
                     type inet:ipv4-address;
-                    description
-                        "BGP Router ID";
+                    description "Router identifier";
                 }
             }
         }
