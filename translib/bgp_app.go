@@ -83,84 +83,6 @@ func (app *BgpApp) translateDelete(d *db.DB) ([]db.WatchKeys, error) {
 	return app.translateCRUDCommon(d, DELETE)
 }
 
-func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
-	log.Info("translateGet:bgp:path =", app.pathInfo.Path)
-	return nil
-}
-
-func (app *BgpApp) translateAction(dbs [db.MaxDB]*db.DB) error {
-	return tlerr.NotSupported("unsupported")
-}
-
-func (app *BgpApp) translateSubscribe(req translateSubRequest) (translateSubResponse, error) {
-	return emptySubscribeResponse(req.path)
-}
-
-func (app *BgpApp) processSubscribe(req processSubRequest) (processSubResponse, error) {
-	return processSubResponse{}, tlerr.New("not implemented")
-}
-
-func (app *BgpApp) processCreate(d *db.DB) (SetResponse, error) {
-	var err error
-	var resp SetResponse
-
-	if err = app.processCommon(d, CREATE); err != nil {
-		log.Error(err)
-		resp = SetResponse{ErrSrc: AppErr}
-	}
-	return resp, err
-}
-
-func (app *BgpApp) processUpdate(d *db.DB) (SetResponse, error) {
-	var err error
-	var resp SetResponse
-
-	if err = app.processCommon(d, UPDATE); err != nil {
-		log.Error(err)
-		resp = SetResponse{ErrSrc: AppErr}
-	}
-	return resp, err
-}
-
-func (app *BgpApp) processReplace(d *db.DB) (SetResponse, error) {
-	var err error
-	var resp SetResponse
-
-	if err = app.processCommon(d, REPLACE); err != nil {
-		log.Error(err)
-		resp = SetResponse{ErrSrc: AppErr}
-	}
-	return resp, err
-}
-
-func (app *BgpApp) processDelete(d *db.DB) (SetResponse, error) {
-	var err error
-	var resp SetResponse
-
-	if err = app.processCommon(d, DELETE); err != nil {
-		log.Error(err)
-		resp = SetResponse{ErrSrc: AppErr}
-	}
-	return resp, err
-}
-
-func (app *BgpApp) processGet(dbs [db.MaxDB]*db.DB, fmtType TranslibFmtType) (GetResponse, error) {
-	var err error
-	var payload []byte
-
-	configDb := dbs[db.ConfigDB]
-	err = app.processCommon(configDb, GET)
-	if err != nil {
-		return GetResponse{Payload: payload, ErrSrc: AppErr}, err
-	}
-
-	return generateGetResponse(app.pathInfo.Path, app.ygotRoot, fmtType)
-}
-
-func (app *BgpApp) processAction(dbs [db.MaxDB]*db.DB) (ActionResponse, error) {
-	return ActionResponse{}, tlerr.New("not implemented")
-}
-
 func (app *BgpApp) translateCRUDCommon(d *db.DB, opcode int) ([]db.WatchKeys, error) {
 	var err error
 	var keys []db.WatchKeys
@@ -171,26 +93,97 @@ func (app *BgpApp) translateCRUDCommon(d *db.DB, opcode int) ([]db.WatchKeys, er
 	return keys, err
 }
 
-func (app *BgpApp) processCommon(d *db.DB, opcode int) error {
+func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
+
+	if isSubtreeRequest(app.pathInfo.Template, "/openconfig-bgp:bgp/global") {
+		var err error
+		bgp := app.getAppRootObject()
+		vrfName := "default"
+		configDB := dbs[db.ConfigDB]
+
+		err = app.convertDBBgpGlobalsToInternal(configDB, db.Key{Comp: []string{vrfName}})
+		if err != nil {
+			return err
+		}
+		ygot.BuildEmptyTree(bgp.Global)
+		app.convertInternalToOCBgpGlobals(vrfName, bgp.Global)
+		return nil
+	} else {
+		return tlerr.NotSupported("Path not supported")
+	}
+}
+
+func (app *BgpApp) translateAction(dbs [db.MaxDB]*db.DB) error {
+	return tlerr.NotSupported("unsupported")
+}
+
+func (app *BgpApp) translateSubscribe(req translateSubRequest) (translateSubResponse, error) {
+	return emptySubscribeResponse(req.path)
+}
+
+func (app *BgpApp) processCreate(d *db.DB) (SetResponse, error) {
 	var err error
-	bgp := app.getAppRootObject()
+	var resp SetResponse
+
+	if err = app.processCRUDCommon(d, CREATE); err != nil {
+		log.Error(err)
+		resp = SetResponse{ErrSrc: AppErr}
+	}
+	return resp, err
+}
+
+func (app *BgpApp) processReplace(d *db.DB) (SetResponse, error) {
+	var err error
+	var resp SetResponse
+
+	if err = app.processCRUDCommon(d, REPLACE); err != nil {
+		log.Error(err)
+		resp = SetResponse{ErrSrc: AppErr}
+	}
+	return resp, err
+}
+
+func (app *BgpApp) processUpdate(d *db.DB) (SetResponse, error) {
+	var err error
+	var resp SetResponse
+
+	if err = app.processCRUDCommon(d, UPDATE); err != nil {
+		log.Error(err)
+		resp = SetResponse{ErrSrc: AppErr}
+	}
+	return resp, err
+}
+
+func (app *BgpApp) processDelete(d *db.DB) (SetResponse, error) {
+	var err error
+	var resp SetResponse
+
+	if err = app.processCRUDCommon(d, DELETE); err != nil {
+		log.Error(err)
+		resp = SetResponse{ErrSrc: AppErr}
+	}
+	return resp, err
+}
+
+func (app *BgpApp) processGet(dbs [db.MaxDB]*db.DB, fmtType TranslibFmtType) (GetResponse, error) {
+	return generateGetResponse(app.pathInfo.Path, app.ygotRoot, fmtType)
+}
+
+func (app *BgpApp) processAction(dbs [db.MaxDB]*db.DB) (ActionResponse, error) {
+	return ActionResponse{}, tlerr.New("not implemented")
+}
+
+func (app *BgpApp) processSubscribe(req processSubRequest) (processSubResponse, error) {
+	return processSubResponse{}, tlerr.New("not implemented")
+}
+
+func (app *BgpApp) processCRUDCommon(d *db.DB, opcode int) error {
+	var err error
 
 	log.Infof("processCommon--Path Received: %s", app.pathInfo.Template)
 
 	if isSubtreeRequest(app.pathInfo.Template, "/openconfig-bgp:bgp/global") {
-		vrfName := "default"
-
-		switch opcode {
-		case CREATE, REPLACE, UPDATE, DELETE:
-			err = app.setBgpGlobalsDataInConfigDb(d, opcode)
-		case GET:
-			err = app.convertDBBgpGlobalsToInternal(d, db.Key{Comp: []string{vrfName}})
-			if err != nil {
-				return err
-			}
-			ygot.BuildEmptyTree(bgp.Global)
-			app.convertInternalToOCBgpGlobals(vrfName, bgp.Global)
-		}
+		err = app.setBgpGlobalsDataInConfigDb(d, opcode)
 	} else {
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -268,8 +261,8 @@ func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) {
 	}
 }
 
-func (app *BgpApp) convertDBBgpGlobalsToInternal(dbCl *db.DB, key db.Key) error {
-	entry, err := dbCl.GetEntry(app.bgpGlobalsTs, key)
+func (app *BgpApp) convertDBBgpGlobalsToInternal(configDB *db.DB, key db.Key) error {
+	entry, err := configDB.GetEntry(app.bgpGlobalsTs, key)
 	if err != nil {
 		return err
 	}
