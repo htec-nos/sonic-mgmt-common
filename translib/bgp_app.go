@@ -4,6 +4,7 @@ import (
 	"fmt" // ADD THIS IMPORT
 	"reflect"
 	"strconv" // Better for string to int conversion
+	"strings"
 
 	"github.com/Azure/sonic-mgmt-common/translib/db"
 	"github.com/Azure/sonic-mgmt-common/translib/ocbinds"
@@ -14,7 +15,8 @@ import (
 )
 
 const (
-	BGP_GLOBALS_TABLE = "BGP_GLOBALS"
+	BGP_GLOBALS_TABLE          = "BGP_GLOBALS"
+	BGP_GLOBALS_AF_NETWORK_TAB = "BGP_GLOBALS_AF_NETWORK"
 )
 
 type BgpApp struct {
@@ -24,6 +26,9 @@ type BgpApp struct {
 
 	bgpGlobalsTs  *db.TableSpec
 	bgpGlobalsMap map[string]db.Value
+
+	bgpGlobalsAfNetTs  *db.TableSpec
+	bgpGlobalsAfNetMap map[string]db.Value
 }
 
 func init() {
@@ -60,6 +65,9 @@ func (app *BgpApp) initialize(data appData) {
 
 	app.bgpGlobalsTs = &db.TableSpec{Name: BGP_GLOBALS_TABLE}
 	app.bgpGlobalsMap = make(map[string]db.Value)
+
+	app.bgpGlobalsAfNetTs = &db.TableSpec{Name: BGP_GLOBALS_AF_NETWORK_TAB}
+	app.bgpGlobalsAfNetMap = make(map[string]db.Value)
 }
 
 func (app *BgpApp) getAppRootObject() *ocbinds.OpenconfigBgp_Bgp {
@@ -94,21 +102,13 @@ func (app *BgpApp) translateCRUDCommon(d *db.DB, opcode int) ([]db.WatchKeys, er
 }
 
 func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
-
-	if isSubtreeRequest(app.pathInfo.Template, "/openconfig-bgp:bgp/global") {
-		var err error
-		bgp := app.getAppRootObject()
-		vrfName := "default"
-		configDB := dbs[db.ConfigDB]
-
-		err = app.convertDBBgpGlobalsToInternal(configDB, db.Key{Comp: []string{vrfName}})
-		if err != nil {
-			return err
-		}
-		ygot.BuildEmptyTree(bgp.Global)
-		app.convertInternalToOCBgpGlobals(vrfName, bgp.Global)
-		return nil
-	} else {
+	path := app.pathInfo.Template
+	switch path {
+	case "/openconfig-bgp:bgp/global":
+		return app.translateGetBgpGlobals(dbs)
+	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks":
+		return app.translateGetBgpGlobalsAfNetwork(dbs)
+	default:
 		return tlerr.NotSupported("Path not supported")
 	}
 }
@@ -191,6 +191,12 @@ func (app *BgpApp) processCRUDCommon(d *db.DB, opcode int) error {
 	return err
 }
 
+// =============================================================================
+// Helper functions for BGP_GLOBALS
+// =============================================================================
+
+// CRUD related
+
 func (app *BgpApp) setBgpGlobalsDataInConfigDb(d *db.DB, opcode int) error {
 	for key, value := range app.bgpGlobalsMap {
 		k := db.Key{Comp: []string{key}}
@@ -261,6 +267,23 @@ func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) {
 	}
 }
 
+// Get related
+
+func (app *BgpApp) translateGetBgpGlobals(dbs [db.MaxDB]*db.DB) error {
+	var err error
+	bgp := app.getAppRootObject()
+	vrfName := "default"
+	configDB := dbs[db.ConfigDB]
+
+	err = app.convertDBBgpGlobalsToInternal(configDB, db.Key{Comp: []string{vrfName}})
+	if err != nil {
+		return err
+	}
+	ygot.BuildEmptyTree(bgp.Global)
+	app.convertInternalToOCBgpGlobals(vrfName, bgp.Global)
+	return nil
+}
+
 func (app *BgpApp) convertDBBgpGlobalsToInternal(configDB *db.DB, key db.Key) error {
 	entry, err := configDB.GetEntry(app.bgpGlobalsTs, key)
 	if err != nil {
@@ -297,5 +320,132 @@ func (app *BgpApp) convertInternalToOCBgpGlobals(vrfName string, global *ocbinds
 			global.Config.RouterId = &routerId
 			global.State.RouterId = &routerId
 		}
+	}
+}
+
+// =============================================================================
+// Helper functions for BGP_GLOBALS_AF_NETWORK
+// =============================================================================
+
+// Get related
+
+func (app *BgpApp) translateGetBgpGlobalsAfNetwork(dbs [db.MaxDB]*db.DB) error {
+	configDB := dbs[db.ConfigDB]
+	afiSafi := strings.ToLower(app.pathInfo.Var("afi-safi-name"))
+	vrfName := "default"
+
+	err := app.convertDBBgpGlobalsAfNetworkToInternal(configDB, vrfName, afiSafi)
+	if err != nil {
+		return err
+	}
+
+	bgp := app.getAppRootObject()
+	ygot.BuildEmptyTree(bgp.Global)
+	app.convertInternalToOCBgpAfNetwork(vrfName, afiSafi, bgp.Global)
+	return nil
+}
+
+func (app *BgpApp) convertDBBgpGlobalsAfNetworkToInternal(configDB *db.DB, vrfName, afiSafi string) error {
+	app.bgpGlobalsAfNetMap = make(map[string]db.Value)
+
+	pattern := fmt.Sprintf("%s|%s|*", vrfName, afiSafi)
+
+	log.Info("todo bien mi patron?", pattern)
+	entries, err := configDB.GetKeys(app.bgpGlobalsAfNetTs)
+	if err != nil {
+		return err
+	}
+
+	for _, k := range entries {
+		if len(k.Comp) < 3 {
+			continue
+		}
+		if k.Comp[0] == vrfName && k.Comp[1] == afiSafi {
+			val, _ := configDB.GetEntry(app.bgpGlobalsAfNetTs, k)
+			app.bgpGlobalsAfNetMap[strings.Join(k.Comp, "|")] = val
+		}
+	}
+	return nil
+}
+
+func (app *BgpApp) convertInternalToOCBgpAfNetwork(vrfName, afiSafi string, global *ocbinds.OpenconfigBgp_Bgp_Global) {
+	if global.AfiSafis == nil {
+		global.AfiSafis = &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis{}
+	}
+
+	// Parse the afiSafi string to enum
+	afiSafiEnum, err := parseAfiSafiType(afiSafi)
+	if err != nil {
+		log.Errorf("Failed to parse AFI-SAFI type %s: %v", afiSafi, err)
+		return
+	}
+
+	// Initialize the map if needed
+	if global.AfiSafis.AfiSafi == nil {
+		global.AfiSafis.AfiSafi = make(map[ocbinds.E_OpenconfigBgpTypes_AFI_SAFI_TYPE]*ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi)
+	}
+
+	// Get or create the AFI-SAFI entry
+	afi, exists := global.AfiSafis.AfiSafi[afiSafiEnum]
+	if !exists {
+		afi = &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi{}
+		global.AfiSafis.AfiSafi[afiSafiEnum] = afi
+	}
+
+	// Initialize Networks container
+	if afi.Networks == nil {
+		afi.Networks = &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks{}
+	}
+
+	log.Info("Tamo parseando la movidita")
+
+	// Networks.Network is likely a map[string]*Network or a slice
+	// Check the actual type definition to determine if it's a map or slice
+	for keyStr, v := range app.bgpGlobalsAfNetMap {
+		log.Info("la clave del exito", keyStr)
+
+		parts := strings.Split(keyStr, "|")
+		if len(parts) < 3 {
+			continue
+		}
+		prefix := parts[2]
+		policy := v.Get("policy")
+		backdoor := v.Get("backdoor") == "true"
+
+		net := &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks_Network{
+			Prefix: ygot.String(prefix),
+			Config: &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks_Network_Config{
+				Prefix:   ygot.String(prefix),
+				Policy:   ygot.String(policy),
+				Backdoor: ygot.Bool(backdoor),
+			},
+			State: &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks_Network_State{
+				Prefix:   ygot.String(prefix),
+				Policy:   ygot.String(policy),
+				Backdoor: ygot.Bool(backdoor),
+			},
+		}
+
+		// Add to Networks - check if it's a map or slice
+		// If map:
+		if afi.Networks.Network == nil {
+			afi.Networks.Network = make(map[string]*ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks_Network)
+		}
+		afi.Networks.Network[prefix] = net
+	}
+}
+
+// Helper function to parse AFI-SAFI string to enum - returns error if invalid
+func parseAfiSafiType(afiSafi string) (ocbinds.E_OpenconfigBgpTypes_AFI_SAFI_TYPE, error) {
+	switch afiSafi {
+	case "ipv4_unicast", "IPV4_UNICAST":
+		return ocbinds.OpenconfigBgpTypes_AFI_SAFI_TYPE_IPV4_UNICAST, nil
+	case "ipv6_unicast", "IPV6_UNICAST":
+		return ocbinds.OpenconfigBgpTypes_AFI_SAFI_TYPE_IPV6_UNICAST, nil
+	case "l2vpn_evpn", "L2VPN_EVPN":
+		return ocbinds.OpenconfigBgpTypes_AFI_SAFI_TYPE_L2VPN_EVPN, nil
+	default:
+		return ocbinds.OpenconfigBgpTypes_AFI_SAFI_TYPE_UNSET,
+			fmt.Errorf("unsupported AFI-SAFI type: %s", afiSafi)
 	}
 }
