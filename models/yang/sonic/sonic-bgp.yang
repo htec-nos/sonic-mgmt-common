@@ -47,5 +47,39 @@ module sonic-bgp {
                 }
             }
         }
+
+        container BGP_GLOBALS_AF_NETWORK {
+            list BGP_GLOBALS_AF_NETWORK_LIST {
+                key "vrf_name afi_safi ip_prefix";
+
+                leaf vrf_name {
+                    type leafref {
+                        path "../../../BGP_GLOBALS/BGP_GLOBALS_LIST/vrf_name";
+                    }
+                    description "VRF name";
+                }
+
+                leaf afi_safi {
+                    type string;
+                    description "Address family name and subsequent address family name";
+                }
+
+                leaf ip_prefix {
+                    type inet:ip-prefix;
+                    description "Network address";
+                }
+
+                leaf policy {
+                    type string;
+                    description "Route-map to modify the attributes";
+                }
+
+                leaf backdoor {
+                    type boolean;
+                    //ext:custom-validation ValidateAfisafiForBackdoor;
+                    description "Indicates the backdoor route";
+                }
+            }
+        }
     }
 }
