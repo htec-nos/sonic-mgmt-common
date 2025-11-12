@@ -91,20 +91,6 @@ func (app *BgpApp) translateDelete(d *db.DB) ([]db.WatchKeys, error) {
 	return app.translateCRUDCommon(d, DELETE)
 }
 
-func (app *BgpApp) translateCRUDCommon(d *db.DB, opcode int) ([]db.WatchKeys, error) {
-	path := app.pathInfo.Template
-	switch path {
-	case "/openconfig-bgp:bgp/global", "/openconfig-bgp:bgp/global/config":
-		return app.convertOCBgpGlobalsToInternal(opcode)
-	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
-		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
-		return app.convertOCBgpGlobalsAfNetworkToInternal(opcode)
-	default:
-		var keys []db.WatchKeys
-		return keys, tlerr.NotSupported("Path not supported")
-	}
-}
-
 func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
 	path := app.pathInfo.Template
 	switch path {
@@ -169,19 +155,6 @@ func (app *BgpApp) processDelete(d *db.DB) (SetResponse, error) {
 	return resp, err
 }
 
-func (app *BgpApp) processCRUDCommon(d *db.DB, opcode int) error {
-	path := app.pathInfo.Template
-	switch path {
-	case "/openconfig-bgp:bgp/global", "/openconfig-bgp:bgp/global/config":
-		return app.setBgpGlobalsDataInConfigDb(d, opcode)
-	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
-		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
-		return app.setBgpGlobalsAfNetworkDataInConfigDb(d, opcode)
-	default:
-		return tlerr.NotSupported("Path not supported")
-	}
-}
-
 func (app *BgpApp) processGet(dbs [db.MaxDB]*db.DB, fmtType TranslibFmtType) (GetResponse, error) {
 	return generateGetResponse(app.pathInfo.Path, app.ygotRoot, fmtType)
 }
@@ -195,15 +168,40 @@ func (app *BgpApp) processSubscribe(req processSubRequest) (processSubResponse, 
 }
 
 // =============================================================================
-// Helper functions for BGP_GLOBALS
+// Helper functions for CRUD common processing
 // =============================================================================
 
-// CRUD related
+func (app *BgpApp) translateCRUDCommon(configDB *db.DB, opcode int) ([]db.WatchKeys, error) {
+	path := app.pathInfo.Template
+	switch path {
+	case "/openconfig-bgp:bgp/global", "/openconfig-bgp:bgp/global/config":
+		return app.convertOCBgpGlobalsToInternal(opcode)
+	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
+		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
+		return app.convertOCBgpGlobalsAfNetworkToInternal(opcode)
+	default:
+		var keys []db.WatchKeys
+		return keys, tlerr.NotSupported("Path not supported")
+	}
+}
 
-func (app *BgpApp) setBgpGlobalsDataInConfigDb(configDB *db.DB, opcode int) error {
-	for key, value := range app.bgpGlobalsMap {
+func (app *BgpApp) processCRUDCommon(configDB *db.DB, opcode int) error {
+	path := app.pathInfo.Template
+	switch path {
+	case "/openconfig-bgp:bgp/global", "/openconfig-bgp:bgp/global/config":
+		return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsTs, app.bgpGlobalsMap, opcode)
+	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
+		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
+		return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsAfNetTs, app.bgpGlobalsAfNetMap, opcode)
+	default:
+		return tlerr.NotSupported("Path not supported")
+	}
+}
+
+func (app *BgpApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataMap map[string]db.Value, opcode int) error {
+	for key, value := range dataMap {
 		k := db.Key{Comp: []string{key}}
-		existingEntry, getErr := configDB.GetEntry(app.bgpGlobalsTs, k)
+		existingEntry, getErr := configDB.GetEntry(ts, k)
 
 		// Return error if GetEntry fails for reasons other than not found
 		if getErr != nil && !isNotFoundError(getErr) {
@@ -214,25 +212,29 @@ func (app *BgpApp) setBgpGlobalsDataInConfigDb(configDB *db.DB, opcode int) erro
 		switch opcode {
 		case CREATE:
 			if existingEntry.IsPopulated() {
-				return tlerr.AlreadyExists("BGP global configuration already exists")
+				return tlerr.AlreadyExists(fmt.Sprintf("%s entry '%s' already exists", ts.Name, key))
 			}
-			err = configDB.CreateEntry(app.bgpGlobalsTs, k, value)
+			err = configDB.CreateEntry(ts, k, value)
+
 		case REPLACE:
 			if existingEntry.IsPopulated() {
-				err = configDB.ModEntry(app.bgpGlobalsTs, k, value)
+				err = configDB.ModEntry(ts, k, value)
 			} else {
-				err = configDB.CreateEntry(app.bgpGlobalsTs, k, value)
+				err = configDB.CreateEntry(ts, k, value)
 			}
+
 		case UPDATE:
 			if !existingEntry.IsPopulated() {
-				return tlerr.NotFound("BGP global configuration not found")
+				return tlerr.NotFound(fmt.Sprintf("%s entry '%s' not found", ts.Name, key))
 			}
-			err = configDB.ModEntry(app.bgpGlobalsTs, k, value)
+			err = configDB.ModEntry(ts, k, value)
+
 		case DELETE:
 			if !existingEntry.IsPopulated() {
-				return tlerr.NotFound("BGP global configuration not found")
+				return tlerr.NotFound(fmt.Sprintf("%s entry '%s' not found", ts.Name, key))
 			}
-			err = configDB.DeleteEntry(app.bgpGlobalsTs, k)
+			err = configDB.DeleteEntry(ts, k)
+
 		default:
 			return fmt.Errorf("unsupported opcode %d", opcode)
 		}
@@ -241,8 +243,15 @@ func (app *BgpApp) setBgpGlobalsDataInConfigDb(configDB *db.DB, opcode int) erro
 			return err
 		}
 	}
+
 	return nil
 }
+
+// =============================================================================
+// Helper functions for BGP_GLOBALS
+// =============================================================================
+
+// CRUD related
 
 func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) ([]db.WatchKeys, error) {
 	var keys []db.WatchKeys
@@ -347,51 +356,6 @@ func (app *BgpApp) convertInternalToOCBgpGlobals(vrfName string, global *ocbinds
 // =============================================================================
 
 // CRUD related
-
-func (app *BgpApp) setBgpGlobalsAfNetworkDataInConfigDb(configDB *db.DB, opcode int) error {
-	for key, value := range app.bgpGlobalsAfNetMap {
-
-		k := db.Key{Comp: []string{key}}
-		existingEntry, getErr := configDB.GetEntry(app.bgpGlobalsAfNetTs, k)
-
-		// Return error if GetEntry fails for reasons other than not found
-		if getErr != nil && !isNotFoundError(getErr) {
-			return getErr
-		}
-
-		var err error
-		switch opcode {
-		case CREATE:
-			if existingEntry.IsPopulated() {
-				return tlerr.AlreadyExists("BGP global configuration already exists")
-			}
-			err = configDB.CreateEntry(app.bgpGlobalsAfNetTs, k, value)
-		case REPLACE:
-			if existingEntry.IsPopulated() {
-				err = configDB.ModEntry(app.bgpGlobalsAfNetTs, k, value)
-			} else {
-				err = configDB.CreateEntry(app.bgpGlobalsAfNetTs, k, value)
-			}
-		case UPDATE:
-			if !existingEntry.IsPopulated() {
-				return tlerr.NotFound("BGP global configuration not found")
-			}
-			err = configDB.ModEntry(app.bgpGlobalsAfNetTs, k, value)
-		case DELETE:
-			if !existingEntry.IsPopulated() {
-				return tlerr.NotFound("BGP global configuration not found")
-			}
-			err = configDB.DeleteEntry(app.bgpGlobalsAfNetTs, k)
-		default:
-			return fmt.Errorf("unsupported opcode %d", opcode)
-		}
-
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func (app *BgpApp) convertOCBgpGlobalsAfNetworkToInternal(opcode int) ([]db.WatchKeys, error) {
 	var keys []db.WatchKeys
