@@ -19,6 +19,14 @@ const (
 	BGP_GLOBALS_AF_NETWORK_TAB = "BGP_GLOBALS_AF_NETWORK"
 )
 
+// bgpDepMap defines the parent->child table relationships in SONiC BGP.
+// It is used during DELETE operations to automatically remove dependent
+// child entries before deleting the parent entry
+var bgpDepMap = map[string][]string{
+	"BGP_GLOBALS": {"BGP_GLOBALS_AF_NETWORK"},
+	// add more parent -> child tables here
+}
+
 type BgpApp struct {
 	pathInfo   *PathInfo
 	ygotRoot   *ygot.GoStruct
@@ -231,9 +239,41 @@ func (app *BgpApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataM
 
 		case DELETE:
 			if !existingEntry.IsPopulated() {
-				return tlerr.NotFound(fmt.Sprintf("%s entry '%s' not found", ts.Name, key))
+				return tlerr.NotFound(fmt.Sprintf("%s entry '%v' not found", ts.Name, k.Comp))
 			}
-			err = configDB.DeleteEntry(ts, k)
+
+			// Check if this table has dependent child tables
+			if childTables, ok := bgpDepMap[ts.Name]; ok {
+				for _, childTable := range childTables {
+					childTs := &db.TableSpec{Name: childTable}
+
+					// Get all keys in the child table
+					childKeys, err := configDB.GetKeys(childTs)
+					if err != nil {
+						log.Warningf("Failed to get keys for child table %s: %v", childTable, err)
+						continue
+					}
+
+					// Delete child entries belonging to this parent key
+					for _, ck := range childKeys {
+						if len(ck.Comp) > 0 && ck.Comp[0] == key {
+							if delErr := configDB.DeleteEntry(childTs, ck); delErr != nil {
+								log.Warningf("Failed to delete dependent entry %s|%s: %v",
+									childTable, strings.Join(ck.Comp, "|"), delErr)
+							} else {
+								log.Infof("Deleted dependent entry %s|%s",
+									childTable, strings.Join(ck.Comp, "|"))
+							}
+						}
+					}
+				}
+			}
+
+			// Finally delete the parent entry
+			if err := configDB.DeleteEntry(ts, k); err != nil {
+				return fmt.Errorf("failed to delete parent %s|%v: %v", ts.Name, k.Comp, err)
+			}
+			log.Infof("Deleted parent entry %s|%v", ts.Name, k.Comp)
 
 		default:
 			return fmt.Errorf("unsupported opcode %d", opcode)
