@@ -1,0 +1,118 @@
+module openconfig-bgp-network-ext {
+  yang-version "1";
+  namespace "http://openconfig.net/yang/bgp/network-ext";
+  prefix "oc-bgp-net-ext";
+
+  import openconfig-bgp { prefix "oc-bgp"; }
+  import openconfig-inet-types { prefix "oc-inet"; }
+  import openconfig-routing-policy { prefix "oc-rpol"; }
+  import openconfig-extensions { prefix oc-ext; }
+
+  // meta
+  organization
+    "HTEC Group";
+
+  contact
+    "alberto.martin@htecgroup.com";
+
+  description
+    "This module defines an OpenConfig extension to the BGP model
+     that adds support for advertising locally originated network
+     prefixes (analogous to 'network' statements in traditional BGP
+     configurations). Each advertised network can optionally
+     reference a route policy and be marked as a backdoor route.";
+
+  oc-ext:openconfig-version "1.0.0";
+
+  revision "2025-11-09" {
+    description
+      "Initial public revision of the BGP network extension model.
+       Adds per-AFI/SAFI configuration for network advertisement
+       with optional route policy and backdoor attributes.";
+    reference
+      "1.0.0";
+  }
+
+  grouping bgp-network-config {
+    description
+      "Configuration data for BGP network advertisements";
+
+    leaf prefix {
+      type oc-inet:ip-prefix;
+      description
+        "Network prefix to advertise via BGP";
+    }
+
+    leaf policy {
+      type leafref {
+        path "/oc-rpol:routing-policy/oc-rpol:policy-definitions/" +
+             "oc-rpol:policy-definition/oc-rpol:name";
+      }
+      description
+        "Reference to a routing policy to modify attributes of the
+        advertised network";
+    }
+
+    leaf backdoor {
+      type boolean;
+      default false;
+      description
+        "Indicates whether this network should be treated as a backdoor
+        route. When true, the network is advertised but routes learned
+        via eBGP are preferred over this locally originated route.";
+    }
+  }
+
+  grouping bgp-network-top {
+    description
+      "Top-level grouping for BGP network advertisement configuration";
+
+    container networks {
+      description
+        "Container for networks to advertise in this address family";
+
+      list network {
+        key "prefix";
+        description
+          "List of network prefixes to advertise via BGP for this
+          address family";
+
+        leaf prefix {
+          type leafref {
+            path "../config/prefix";
+          }
+          description
+            "Reference to the network prefix key";
+        }
+
+        container config {
+          description
+            "Configuration data for BGP network advertisement";
+          uses bgp-network-config;
+        }
+
+        container state {
+          config false;
+          description
+            "Operational state data for BGP network advertisement";
+          uses bgp-network-config;
+        }
+      }
+    }
+  }
+
+  grouping bgp-network-ext-top {
+    description
+      "Top-level grouping for BGP network extensions";
+  }
+
+  // Augment afi-safi container
+  augment "/oc-bgp:bgp/oc-bgp:global/oc-bgp:afi-safis/oc-bgp:afi-safi" {
+  description
+    "Add network advertisement configuration to the BGP AFI/SAFI level.";
+
+  uses bgp-network-top;
+  }
+
+  uses bgp-network-ext-top;
+}
