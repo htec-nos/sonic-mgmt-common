@@ -1,11 +1,23 @@
-module sonic-bgp {  
-    namespace "http://github.com/Azure/sonic-bgp";  
-    prefix sbgp;  
-    yang-version 1.1;  
+module sonic-bgp-global {
+    namespace "http://github.com/sonic-net/sonic-bgp-global";
+    prefix bgpg;
+    yang-version 1.1;
+
+    import sonic-vrf {
+        prefix vrf;
+    }
 
     import ietf-inet-types {
         prefix inet;
-    }  
+    }
+
+    import sonic-route-map {
+        prefix rmap;
+    }
+
+    import sonic-extension {
+        prefix ext;
+    }
 
     organization
         "SONiC";
@@ -14,24 +26,33 @@ module sonic-bgp {
         "SONiC";
 
     description
-        "SONIC BGP";
+        "SONIC BGP Global YANG";
 
-    revision 2025-10-27 {
+    revision 2021-02-26 {
         description
             "Initial revision.";
     }
 
-    container sonic-bgp {
-
+    container sonic-bgp-global {
         container BGP_GLOBALS {
-
             list BGP_GLOBALS_LIST {
                 key "vrf_name";
 
                 leaf vrf_name {
-                    type string;
-                    description
-                        "VRF name, use 'default' for default VRF";
+                    type union {
+                        type string {
+                            pattern "default";
+                        }
+                        type leafref {
+                            path "/vrf:sonic-vrf/vrf:VRF/vrf:VRF_LIST/vrf:name";
+                        }
+                    }
+                    description "VRF name";
+                }
+
+                leaf router_id {
+                    type inet:ipv4-address;
+                    description "Router identifier";
                 }
 
                 leaf local_asn {
@@ -39,11 +60,6 @@ module sonic-bgp {
                         range "1..4294967295";
                     }
                     description "local AS number";
-                }
-
-                leaf router_id {
-                    type inet:ipv4-address;
-                    description "Router identifier";
                 }
             }
         }
@@ -70,7 +86,9 @@ module sonic-bgp {
                 }
 
                 leaf policy {
-                    type string;
+                    type leafref {
+                        path "/rmap:sonic-route-map/rmap:ROUTE_MAP_SET/rmap:ROUTE_MAP_SET_LIST/rmap:name";
+                    }
                     description "Route-map to modify the attributes";
                 }
 
