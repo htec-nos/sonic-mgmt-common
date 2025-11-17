@@ -492,6 +492,10 @@ func (app *BgpApp) convertDBBgpGlobalsAfNetworkToInternal(configDB *db.DB, afiSa
 		return err
 	}
 
+	if len(entries) == 0 {
+		return tlerr.NotFound("BGP_GLOBALS_AF_NETWORK configuration not found")
+	}
+
 	for _, k := range entries {
 		if len(k.Comp) < 3 {
 			continue
