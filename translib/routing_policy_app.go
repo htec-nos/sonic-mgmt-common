@@ -162,36 +162,28 @@ func (app *RoutingPolicyApp) processSubscribe(req processSubRequest) (processSub
 // =============================================================================
 
 func (app *RoutingPolicyApp) translateCRUDCommon(configDB *db.DB, opcode int) ([]db.WatchKeys, error) {
-	// path := app.pathInfo.Template
-	// switch path {
-	// case "/openconfig-bgp:bgp/global", "/openconfig-bgp:bgp/global/config":
-	// 	return app.convertOCBgpGlobalsToInternal(opcode)
-	// case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
-	// 	"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
-	// 	return app.convertOCBgpGlobalsAfNetworkToInternal(opcode)
-	// default:
-	// 	var keys []db.WatchKeys
-	// 	return keys, tlerr.NotSupported("Path not supported")
-	// }
-	var keys []db.WatchKeys
-	return keys, tlerr.NotSupported("Path not supported")
+	path := app.pathInfo.Template
+	switch path {
+	case "/openconfig-routing-policy:routing-policy/policy-definitions/policy-definition{}/statements/statement{}":
+		return app.convertOCRouteMapToInternal(opcode)
+	default:
+		var keys []db.WatchKeys
+		return keys, tlerr.NotSupported("Path not supported")
+	}
 }
 
 func (app *RoutingPolicyApp) processCRUDCommon(configDB *db.DB, opcode int) error {
-	// path := app.pathInfo.Template
-	// switch path {
-	// case "/openconfig-bgp:bgp/global", "/openconfig-bgp:bgp/global/config":
-	// 	return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsTs, app.bgpGlobalsMap, opcode)
-	// case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
-	// 	"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
-	// 	return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsAfNetTs, app.bgpGlobalsAfNetMap, opcode)
-	// default:
-	// 	return tlerr.NotSupported("Path not supported")
-	// }
+	path := app.pathInfo.Template
+	switch path {
+	case "/openconfig-routing-policy:routing-policy/policy-definitions/policy-definition{}/statements/statement{}":
+		return app.setDataInConfigDb(configDB, app.routeMapTs, app.routeMapMap, opcode)
+	default:
+		return tlerr.NotSupported("Path not supported")
+	}
 	return tlerr.NotSupported("Path not supported")
 }
 
-func (app *RoutingPolicyApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataMap map[string]db.Value, opcode int) error {
+func (app *RoutingPolicyApp) setDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataMap map[string]db.Value, opcode int) error {
 	for key, value := range dataMap {
 		k := db.Key{Comp: []string{key}}
 		existingEntry, getErr := configDB.GetEntry(ts, k)
@@ -243,6 +235,86 @@ func (app *RoutingPolicyApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableS
 // =============================================================================
 // Helper functions for ROUTE_MAP
 // =============================================================================
+
+// CRUD related
+
+func (app *RoutingPolicyApp) convertOCRouteMapToInternal(opcode int) ([]db.WatchKeys, error) {
+	var keys []db.WatchKeys
+
+	polName := app.pathInfo.Var("name")
+	stmtName := app.pathInfo.Var("name#2")
+
+	dbKey := fmt.Sprintf("%s|%s", polName, stmtName)
+
+	if opcode == DELETE {
+		// For DELETE, just populate the map with the VRF key
+		// No need to read from YANG payload since DELETE has no payload
+		app.routeMapMap = make(map[string]db.Value)
+		app.routeMapMap[dbKey] = db.Value{Field: map[string]string{}}
+
+		// Generate watch keys
+		keys = append(keys, db.WatchKeys{
+			Ts:  app.routeMapTs,
+			Key: &db.Key{Comp: strings.Split(dbKey, "|")},
+		})
+		return keys, nil
+	}
+
+	rp := app.getAppRootObject()
+
+	if rp.PolicyDefinitions == nil || rp.PolicyDefinitions.PolicyDefinition == nil {
+		return keys, tlerr.NotFound("Policy definitions not found in payload")
+	}
+
+	polDef, exists := rp.PolicyDefinitions.PolicyDefinition[polName]
+	if !exists {
+		return keys, tlerr.NotFound(fmt.Sprintf("Policy definition '%s' not found", polName))
+	}
+
+	if polDef.Statements == nil || polDef.Statements.Statement == nil {
+		return keys, tlerr.NotFound(fmt.Sprintf("Statements not found for policy '%s'", polName))
+	}
+
+	stmt, exists := polDef.Statements.Statement[stmtName]
+	if !exists {
+		return keys, tlerr.NotFound(fmt.Sprintf("Statement '%s' not found in policy '%s'", stmtName, polName))
+	}
+
+	// Initialize the map
+	app.routeMapMap = make(map[string]db.Value)
+	// Create the db.Value for this route map entry
+	routeMapData := db.Value{Field: make(map[string]string)}
+
+	// Map Actions to DB fields
+	if stmt.Actions != nil && stmt.Actions.Config != nil {
+		if stmt.Actions.Config.PolicyResult == ocbinds.OpenconfigRoutingPolicy_PolicyResultType_ACCEPT_ROUTE {
+			routeMapData.Field["route_operation"] = "permit"
+		} else if stmt.Actions.Config.PolicyResult == ocbinds.OpenconfigRoutingPolicy_PolicyResultType_REJECT_ROUTE {
+			routeMapData.Field["route_operation"] = "deny"
+		}
+	}
+
+	// Map Conditions to DB fields
+	if stmt.Conditions != nil {
+		// Match prefix set
+		if stmt.Conditions.MatchPrefixSet != nil && stmt.Conditions.MatchPrefixSet.Config != nil {
+			if stmt.Conditions.MatchPrefixSet.Config.PrefixSet != nil {
+				routeMapData.Field["match_prefix_set"] = *stmt.Conditions.MatchPrefixSet.Config.PrefixSet
+			}
+		}
+	}
+
+	// Store in the map
+	app.routeMapMap[dbKey] = routeMapData
+
+	// Generate watch keys
+	keys = append(keys, db.WatchKeys{
+		Ts:  app.routeMapTs,
+		Key: &db.Key{Comp: strings.Split(dbKey, "|")},
+	})
+
+	return keys, nil
+}
 
 // Get related
 
