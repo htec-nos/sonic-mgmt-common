@@ -18,6 +18,7 @@ import (
 const (
 	BGP_GLOBALS_TABLE          = "BGP_GLOBALS"
 	BGP_GLOBALS_AF_NETWORK_TAB = "BGP_GLOBALS_AF_NETWORK"
+	BGP_NEIGHBOR_TAB           = "BGP_NEIGHBOR"
 )
 
 type BgpApp struct {
@@ -30,6 +31,9 @@ type BgpApp struct {
 
 	bgpGlobalsAfNetTs  *db.TableSpec
 	bgpGlobalsAfNetMap map[string]db.Value
+
+	bgpNeighborTs  *db.TableSpec
+	bgpNeighborMap map[string]db.Value
 
 	vrfName string
 }
@@ -72,6 +76,9 @@ func (app *BgpApp) initialize(data appData) {
 
 	app.bgpGlobalsAfNetTs = &db.TableSpec{Name: BGP_GLOBALS_AF_NETWORK_TAB}
 	app.bgpGlobalsAfNetMap = make(map[string]db.Value)
+
+	app.bgpNeighborTs = &db.TableSpec{Name: BGP_NEIGHBOR_TAB}
+	app.bgpNeighborMap = make(map[string]db.Value)
 }
 
 func (app *BgpApp) getAppRootObject() *ocbinds.OpenconfigBgp_Bgp {
@@ -102,6 +109,8 @@ func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
 		return app.translateGetBgpGlobals(dbs)
 	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks":
 		return app.translateGetBgpGlobalsAfNetwork(dbs)
+	case "/openconfig-bgp:bgp/neighbors":
+		return app.translateGetBgpNeighbor(dbs)
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -183,6 +192,9 @@ func (app *BgpApp) translateCRUDCommon(configDB *db.DB, opcode int) ([]db.WatchK
 	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
 		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
 		return app.convertOCBgpGlobalsAfNetworkToInternal(opcode)
+	case "/openconfig-bgp:bgp/neighbors/neighbor{}":
+		var keys []db.WatchKeys
+		return keys, tlerr.NotSupported("Path not supported")
 	default:
 		var keys []db.WatchKeys
 		return keys, tlerr.NotSupported("Path not supported")
@@ -197,6 +209,8 @@ func (app *BgpApp) processCRUDCommon(configDB *db.DB, opcode int) error {
 	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
 		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
 		return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsAfNetTs, app.bgpGlobalsAfNetMap, opcode)
+	case "/openconfig-bgp:bgp/neighbors/neighbor{}":
+		return tlerr.NotSupported("Path not supported")
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -585,5 +599,100 @@ func parseAfiSafiType(afiSafi string) (ocbinds.E_OpenconfigBgpTypes_AFI_SAFI_TYP
 	default:
 		return ocbinds.OpenconfigBgpTypes_AFI_SAFI_TYPE_UNSET,
 			fmt.Errorf("unsupported AFI-SAFI type: %s", afiSafi)
+	}
+}
+
+// =============================================================================
+// Helper functions for BGP_NEIGHBOR
+// =============================================================================
+
+// Get related
+
+func (app *BgpApp) translateGetBgpNeighbor(dbs [db.MaxDB]*db.DB) error {
+	configDB := dbs[db.ConfigDB]
+
+	err := app.convertDBBgpNeighborsToInternal(configDB)
+	if err != nil {
+		return err
+	}
+
+	bgp := app.getAppRootObject()
+	ygot.BuildEmptyTree(bgp.Neighbors)
+	app.convertInternalToOCBgpNeighbor(bgp.Neighbors)
+	return nil
+}
+
+func (app *BgpApp) convertDBBgpNeighborsToInternal(configDB *db.DB) error {
+	app.bgpNeighborMap = make(map[string]db.Value)
+
+	entries, err := configDB.GetKeys(app.bgpNeighborTs)
+	if err != nil {
+		return err
+	}
+
+	if len(entries) == 0 {
+		return tlerr.NotFound("BGP_GLOBALS_AF_NETWORK configuration not found")
+	}
+
+	for _, k := range entries {
+		if len(k.Comp) < 2 {
+			continue
+		}
+		if k.Comp[0] == app.vrfName {
+			val, _ := configDB.GetEntry(app.bgpNeighborTs, k)
+			app.bgpNeighborMap[strings.Join(k.Comp, "|")] = val
+		}
+	}
+	return nil
+}
+
+func (app *BgpApp) convertInternalToOCBgpNeighbor(neighbors *ocbinds.OpenconfigBgp_Bgp_Neighbors) {
+	// Initialize Neighbors container if needed
+	if neighbors.Neighbor == nil {
+		neighbors.Neighbor = make(map[string]*ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor)
+	}
+
+	// Process each neighbor from internal map
+	for keyStr, data := range app.bgpNeighborMap {
+		parts := strings.Split(keyStr, "|")
+		if len(parts) < 2 {
+			continue
+		}
+
+		neighborAddr := parts[1]
+
+		// Create neighbor entry
+		neighbor, err := neighbors.NewNeighbor(neighborAddr)
+		if err != nil {
+			continue
+		}
+
+		ygot.BuildEmptyTree(neighbor)
+
+		// Set neighbor address in Config and State
+		neighbor.Config.NeighborAddress = ygot.String(neighborAddr)
+		neighbor.State.NeighborAddress = ygot.String(neighborAddr)
+
+		// Map "asn" field to peer-as
+		if asnStr := data.Get("asn"); asnStr != "" {
+			if asn, err := strconv.ParseUint(asnStr, 10, 32); err == nil {
+				peerAs := uint32(asn)
+				neighbor.Config.PeerAs = &peerAs
+				neighbor.State.PeerAs = &peerAs
+			}
+		}
+
+		// Map "local_addr" field to local-address in transport config
+		if localAddr := data.Get("local_addr"); localAddr != "" {
+			ygot.BuildEmptyTree(neighbor.Transport)
+			neighbor.Transport.Config.LocalAddress = ygot.String(localAddr)
+			neighbor.Transport.State.LocalAddress = ygot.String(localAddr)
+		}
+
+		// Map "name" field to description
+		if name := data.Get("name"); name != "" {
+			neighbor.Config.Description = ygot.String(name)
+			neighbor.State.Description = ygot.String(name)
+		}
 	}
 }
