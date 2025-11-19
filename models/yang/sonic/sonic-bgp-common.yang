@@ -216,19 +216,19 @@ module sonic-bgp-common {
         leaf local_addr {
             type union {
                 type inet:ip-address;
-                type leafref {
-                    path "/port:sonic-port/port:PORT/port:PORT_LIST/port:name";
-                }
-                type leafref {
-                    path "/lag:sonic-portchannel/lag:PORTCHANNEL/lag:PORTCHANNEL_LIST/lag:name";
-                }
+                //type leafref {
+                //    path "/port:sonic-port/port:PORT/port:PORT_LIST/port:name";
+                //}
+                //type leafref {
+                //    path "/lag:sonic-portchannel/lag:PORTCHANNEL/lag:PORTCHANNEL_LIST/lag:name";
+                //}
                 // Comment VLAN leaf reference here until libyang back-links issue is resolved and use VLAN string pattern
                 //type leafref {
                 //    path "/vlan:sonic-vlan/vlan:VLAN/vlan:VLAN_LIST/vlan:name";
                 //}
-                type leafref {
-                    path "/lointf:sonic-loopback-interface/lointf:LOOPBACK_INTERFACE/lointf:LOOPBACK_INTERFACE_LIST/lointf:name";
-                }
+                //type leafref {
+                //    path "/lointf:sonic-loopback-interface/lointf:LOOPBACK_INTERFACE/lointf:LOOPBACK_INTERFACE_LIST/lointf:name";
+                //}
                 type string {
                     pattern 'Vlan([0-9]{1,3}|[1-3][0-9]{3}|[4][0][0-8][0-9]|[4][0][9][0-4])';
                 }

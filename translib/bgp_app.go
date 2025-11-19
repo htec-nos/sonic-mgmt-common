@@ -35,6 +35,7 @@ type BgpApp struct {
 
 	bgpNeighborTs  *db.TableSpec
 	bgpNeighborMap map[string]db.Value
+
 	bgpNeighborAfTs  *db.TableSpec
 	bgpNeighborAfMap map[string]db.Value
 
@@ -82,6 +83,7 @@ func (app *BgpApp) initialize(data appData) {
 
 	app.bgpNeighborTs = &db.TableSpec{Name: BGP_NEIGHBOR_TAB}
 	app.bgpNeighborMap = make(map[string]db.Value)
+
 	app.bgpNeighborAfTs = &db.TableSpec{Name: BGP_NEIGHBOR_AF_TAB}
 	app.bgpNeighborAfMap = make(map[string]db.Value)
 }
@@ -205,8 +207,7 @@ func (app *BgpApp) translateCRUDCommon(configDB *db.DB, opcode int) ([]db.WatchK
 		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
 		return app.convertOCBgpGlobalsAfNetworkToInternal(opcode)
 	case "/openconfig-bgp:bgp/neighbors/neighbor{}":
-		var keys []db.WatchKeys
-		return keys, tlerr.NotSupported("Path not supported")
+		return app.convertOCBgpNeighborToInternal(opcode)
 	default:
 		var keys []db.WatchKeys
 		return keys, tlerr.NotSupported("Path not supported")
@@ -222,7 +223,7 @@ func (app *BgpApp) processCRUDCommon(configDB *db.DB, opcode int) error {
 		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
 		return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsAfNetTs, app.bgpGlobalsAfNetMap, opcode)
 	case "/openconfig-bgp:bgp/neighbors/neighbor{}":
-		return tlerr.NotSupported("Path not supported")
+		return app.setBgpDataInConfigDb(configDB, app.bgpNeighborTs, app.bgpNeighborMap, opcode)
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -270,7 +271,7 @@ func (app *BgpApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataM
 			}
 			defer cvl.ValidationSessClose(cvlSess)
 
-			redisKey := ts.Name + "|" + app.vrfName
+			redisKey := ts.Name + "|" + key
 
 			depEntries := cvlSess.GetDepDataForDelete(redisKey)
 
@@ -614,6 +615,70 @@ func parseAfiSafiType(afiSafi string) (ocbinds.E_OpenconfigBgpTypes_AFI_SAFI_TYP
 // =============================================================================
 // Helper functions for BGP_NEIGHBOR
 // =============================================================================
+
+// CRUD related
+
+func (app *BgpApp) convertOCBgpNeighborToInternal(opcode int) ([]db.WatchKeys, error) {
+	var keys []db.WatchKeys
+	neighborAddr := app.pathInfo.Var("neighbor-address")
+
+	dbKey := fmt.Sprintf("%s|%s", app.vrfName, neighborAddr)
+
+	if opcode == DELETE {
+		app.bgpNeighborMap = make(map[string]db.Value)
+		app.bgpNeighborMap[dbKey] = db.Value{Field: map[string]string{}}
+
+		keys = append(keys, db.WatchKeys{
+			Ts:  app.bgpNeighborTs,
+			Key: &db.Key{Comp: []string{app.vrfName, neighborAddr}},
+		})
+		return keys, nil
+	}
+
+	bgp := app.getAppRootObject()
+	if bgp == nil || bgp.Neighbors == nil {
+		return keys, tlerr.NotFound("BGP neighbors configuration not found in YANG payload")
+	}
+
+	neighborEntry, exists := bgp.Neighbors.Neighbor[neighborAddr]
+	if !exists {
+		return keys, tlerr.NotFound("BGP neighbor not found in YANG payload")
+	}
+
+	app.bgpNeighborMap = make(map[string]db.Value)
+	app.bgpNeighborMap[dbKey] = db.Value{Field: map[string]string{}}
+
+	hasFields := false
+	if neighborEntry.Config != nil {
+		if neighborEntry.Config.PeerAs != nil {
+			app.bgpNeighborMap[dbKey].Field["asn"] = fmt.Sprint(*neighborEntry.Config.PeerAs)
+			hasFields = true
+		}
+		if neighborEntry.Config.Description != nil {
+			app.bgpNeighborMap[dbKey].Field["name"] = *neighborEntry.Config.Description
+			hasFields = true
+		}
+	}
+
+	// Transport is a sibling container, not nested in Config
+	if neighborEntry.Transport != nil && neighborEntry.Transport.Config != nil {
+		if neighborEntry.Transport.Config.LocalAddress != nil {
+			app.bgpNeighborMap[dbKey].Field["local_addr"] = *neighborEntry.Transport.Config.LocalAddress
+			hasFields = true
+		}
+	}
+
+	if !hasFields {
+		app.bgpNeighborMap[dbKey].Field["NULL"] = "NULL"
+	}
+
+	keys = append(keys, db.WatchKeys{
+		Ts:  app.bgpNeighborTs,
+		Key: &db.Key{Comp: []string{app.vrfName, neighborAddr}},
+	})
+
+	return keys, nil
+}
 
 // Get related
 
