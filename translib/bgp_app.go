@@ -6,6 +6,7 @@ import (
 	"strconv" // Better for string to int conversion
 	"strings"
 
+	"github.com/Azure/sonic-mgmt-common/cvl"
 	"github.com/Azure/sonic-mgmt-common/translib/db"
 	"github.com/Azure/sonic-mgmt-common/translib/ocbinds"
 	"github.com/Azure/sonic-mgmt-common/translib/tlerr"
@@ -20,14 +21,6 @@ const (
 	BGP_NEIGHBOR_AF_TAB        = "BGP_NEIGHBOR_AF"
 )
 
-// bgpDepMap defines the parent->child table relationships in SONiC BGP.
-// It is used during DELETE operations to automatically remove dependent
-// child entries before deleting the parent entry
-var bgpDepMap = map[string][]string{
-	"BGP_GLOBALS": {"BGP_GLOBALS_AF_NETWORK"},
-	// add more parent -> child tables here
-}
-
 type BgpApp struct {
 	pathInfo   *PathInfo
 	ygotRoot   *ygot.GoStruct
@@ -41,6 +34,8 @@ type BgpApp struct {
 
 	bgpNeighborAfTs  *db.TableSpec
 	bgpNeighborAfMap map[string]db.Value
+
+	vrfName string
 }
 
 func init() {
@@ -73,6 +68,7 @@ func (app *BgpApp) initialize(data appData) {
 		pathInfo:   pathInfo,
 		ygotRoot:   data.ygotRoot,
 		ygotTarget: data.ygotTarget,
+		vrfName:    "default",
 	}
 
 	app.bgpGlobalsTs = &db.TableSpec{Name: BGP_GLOBALS_TABLE}
@@ -253,41 +249,33 @@ func (app *BgpApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataM
 
 		case DELETE:
 			if !existingEntry.IsPopulated() {
-				return tlerr.NotFound(fmt.Sprintf("%s entry '%v' not found", ts.Name, k.Comp))
+				return tlerr.NotFound(fmt.Sprintf("%s entry '%v' not found", ts.Name, key))
 			}
 
-			// Check if this table has dependent child tables
-			if childTables, ok := bgpDepMap[ts.Name]; ok {
-				for _, childTable := range childTables {
-					childTs := &db.TableSpec{Name: childTable}
+			cvlSess, cvlErr := configDB.NewValidationSession()
+			if cvlErr != nil {
+				return fmt.Errorf("failed to open CVL session: %v", cvlErr)
+			}
+			defer cvl.ValidationSessClose(cvlSess)
 
-					// Get all keys in the child table
-					childKeys, err := configDB.GetKeys(childTs)
-					if err != nil {
-						log.Warningf("Failed to get keys for child table %s: %v", childTable, err)
-						continue
-					}
+			redisKey := ts.Name + "|" + app.vrfName
 
-					// Delete child entries belonging to this parent key
-					for _, ck := range childKeys {
-						if len(ck.Comp) > 0 && ck.Comp[0] == key {
-							if delErr := configDB.DeleteEntry(childTs, ck); delErr != nil {
-								log.Warningf("Failed to delete dependent entry %s|%s: %v",
-									childTable, strings.Join(ck.Comp, "|"), delErr)
-							} else {
-								log.Infof("Deleted dependent entry %s|%s",
-									childTable, strings.Join(ck.Comp, "|"))
-							}
-						}
+			depEntries := cvlSess.GetDepDataForDelete(redisKey)
+
+			// Delete dependent entries first
+			for _, depData := range depEntries {
+				for depKey := range depData.Entry {
+					parts := strings.SplitN(depKey, "|", 2)
+					if len(parts) == 2 {
+						depTs := &db.TableSpec{Name: parts[0]}
+						depKeyComps := strings.Split(parts[1], "|")
+						configDB.DeleteEntry(depTs, db.Key{Comp: depKeyComps})
 					}
 				}
 			}
 
 			// Finally delete the parent entry
-			if err := configDB.DeleteEntry(ts, k); err != nil {
-				return fmt.Errorf("failed to delete parent %s|%v: %v", ts.Name, k.Comp, err)
-			}
-			log.Infof("Deleted parent entry %s|%v", ts.Name, k.Comp)
+			err = configDB.DeleteEntry(ts, k)
 
 		default:
 			return fmt.Errorf("unsupported opcode %d", opcode)
@@ -309,38 +297,37 @@ func (app *BgpApp) setBgpDataInConfigDb(configDB *db.DB, ts *db.TableSpec, dataM
 
 func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) ([]db.WatchKeys, error) {
 	var keys []db.WatchKeys
-	vrfName := "default"
 
 	if opcode == DELETE {
 		// For DELETE, just populate the map with the VRF key
 		// No need to read from YANG payload since DELETE has no payload
 		app.bgpGlobalsMap = make(map[string]db.Value)
-		app.bgpGlobalsMap[vrfName] = db.Value{Field: map[string]string{}}
+		app.bgpGlobalsMap[app.vrfName] = db.Value{Field: map[string]string{}}
 
 		// Generate watch keys
 		keys = append(keys, db.WatchKeys{
 			Ts:  app.bgpGlobalsTs,
-			Key: &db.Key{Comp: []string{vrfName}},
+			Key: &db.Key{Comp: []string{app.vrfName}},
 		})
 		return keys, nil
 	}
 
 	bgp := app.getAppRootObject()
 	if bgp != nil && bgp.Global != nil {
-		app.bgpGlobalsMap[vrfName] = db.Value{Field: map[string]string{}}
+		app.bgpGlobalsMap[app.vrfName] = db.Value{Field: map[string]string{}}
 
 		if bgp.Global.Config != nil {
 			if bgp.Global.Config.As != nil {
-				app.bgpGlobalsMap[vrfName].Field["local_asn"] = fmt.Sprint(*bgp.Global.Config.As)
+				app.bgpGlobalsMap[app.vrfName].Field["local_asn"] = fmt.Sprint(*bgp.Global.Config.As)
 			}
 			if bgp.Global.Config.RouterId != nil {
-				app.bgpGlobalsMap[vrfName].Field["router_id"] = *bgp.Global.Config.RouterId
+				app.bgpGlobalsMap[app.vrfName].Field["router_id"] = *bgp.Global.Config.RouterId
 			}
 		}
 		// Generate watch keys
 		keys = append(keys, db.WatchKeys{
 			Ts:  app.bgpGlobalsTs,
-			Key: &db.Key{Comp: []string{vrfName}},
+			Key: &db.Key{Comp: []string{app.vrfName}},
 		})
 
 		return keys, nil
@@ -354,15 +341,14 @@ func (app *BgpApp) convertOCBgpGlobalsToInternal(opcode int) ([]db.WatchKeys, er
 func (app *BgpApp) translateGetBgpGlobals(dbs [db.MaxDB]*db.DB) error {
 	var err error
 	bgp := app.getAppRootObject()
-	vrfName := "default"
 	configDB := dbs[db.ConfigDB]
 
-	err = app.convertDBBgpGlobalsToInternal(configDB, db.Key{Comp: []string{vrfName}})
+	err = app.convertDBBgpGlobalsToInternal(configDB, db.Key{Comp: []string{app.vrfName}})
 	if err != nil {
 		return err
 	}
 	ygot.BuildEmptyTree(bgp.Global)
-	app.convertInternalToOCBgpGlobals(vrfName, bgp.Global)
+	app.convertInternalToOCBgpGlobals(bgp.Global)
 	return nil
 }
 
@@ -379,8 +365,8 @@ func (app *BgpApp) convertDBBgpGlobalsToInternal(configDB *db.DB, key db.Key) er
 	return nil
 }
 
-func (app *BgpApp) convertInternalToOCBgpGlobals(vrfName string, global *ocbinds.OpenconfigBgp_Bgp_Global) {
-	if data, ok := app.bgpGlobalsMap[vrfName]; ok {
+func (app *BgpApp) convertInternalToOCBgpGlobals(global *ocbinds.OpenconfigBgp_Bgp_Global) {
+	if data, ok := app.bgpGlobalsMap[app.vrfName]; ok {
 		// Ensure Config and State are initialized
 		if global.Config == nil {
 			global.Config = &ocbinds.OpenconfigBgp_Bgp_Global_Config{}
@@ -415,9 +401,8 @@ func (app *BgpApp) convertOCBgpGlobalsAfNetworkToInternal(opcode int) ([]db.Watc
 	var keys []db.WatchKeys
 	afiSafi := strings.ToLower(app.pathInfo.Var("afi-safi-name"))
 	prefix := app.pathInfo.Var("prefix")
-	vrfName := "default"
 
-	dbKey := fmt.Sprintf("%s|%s|%s", vrfName, afiSafi, prefix)
+	dbKey := fmt.Sprintf("%s|%s|%s", app.vrfName, afiSafi, prefix)
 
 	if opcode == DELETE {
 		// For DELETE, just populate the map with the VRF, AFI-SAFI and prefix key
@@ -428,7 +413,7 @@ func (app *BgpApp) convertOCBgpGlobalsAfNetworkToInternal(opcode int) ([]db.Watc
 
 		keys = append(keys, db.WatchKeys{
 			Ts:  app.bgpGlobalsAfNetTs,
-			Key: &db.Key{Comp: []string{vrfName, afiSafi, prefix}},
+			Key: &db.Key{Comp: []string{app.vrfName, afiSafi, prefix}},
 		})
 		return keys, nil
 	}
@@ -490,7 +475,7 @@ func (app *BgpApp) convertOCBgpGlobalsAfNetworkToInternal(opcode int) ([]db.Watc
 	// Generate watch keys
 	keys = append(keys, db.WatchKeys{
 		Ts:  app.bgpGlobalsAfNetTs,
-		Key: &db.Key{Comp: []string{vrfName, afiSafi, prefix}},
+		Key: &db.Key{Comp: []string{app.vrfName, afiSafi, prefix}},
 	})
 
 	return keys, nil
@@ -501,20 +486,19 @@ func (app *BgpApp) convertOCBgpGlobalsAfNetworkToInternal(opcode int) ([]db.Watc
 func (app *BgpApp) translateGetBgpGlobalsAfNetwork(dbs [db.MaxDB]*db.DB) error {
 	configDB := dbs[db.ConfigDB]
 	afiSafi := strings.ToLower(app.pathInfo.Var("afi-safi-name"))
-	vrfName := "default"
 
-	err := app.convertDBBgpGlobalsAfNetworkToInternal(configDB, vrfName, afiSafi)
+	err := app.convertDBBgpGlobalsAfNetworkToInternal(configDB, afiSafi)
 	if err != nil {
 		return err
 	}
 
 	bgp := app.getAppRootObject()
 	ygot.BuildEmptyTree(bgp.Global)
-	app.convertInternalToOCBgpAfNetwork(vrfName, afiSafi, bgp.Global)
+	app.convertInternalToOCBgpAfNetwork(afiSafi, bgp.Global)
 	return nil
 }
 
-func (app *BgpApp) convertDBBgpGlobalsAfNetworkToInternal(configDB *db.DB, vrfName, afiSafi string) error {
+func (app *BgpApp) convertDBBgpGlobalsAfNetworkToInternal(configDB *db.DB, afiSafi string) error {
 	app.bgpGlobalsAfNetMap = make(map[string]db.Value)
 
 	entries, err := configDB.GetKeys(app.bgpGlobalsAfNetTs)
@@ -522,11 +506,15 @@ func (app *BgpApp) convertDBBgpGlobalsAfNetworkToInternal(configDB *db.DB, vrfNa
 		return err
 	}
 
+	if len(entries) == 0 {
+		return tlerr.NotFound("BGP_GLOBALS_AF_NETWORK configuration not found")
+	}
+
 	for _, k := range entries {
 		if len(k.Comp) < 3 {
 			continue
 		}
-		if k.Comp[0] == vrfName && k.Comp[1] == afiSafi {
+		if k.Comp[0] == app.vrfName && k.Comp[1] == afiSafi {
 			val, _ := configDB.GetEntry(app.bgpGlobalsAfNetTs, k)
 			app.bgpGlobalsAfNetMap[strings.Join(k.Comp, "|")] = val
 		}
@@ -534,7 +522,7 @@ func (app *BgpApp) convertDBBgpGlobalsAfNetworkToInternal(configDB *db.DB, vrfNa
 	return nil
 }
 
-func (app *BgpApp) convertInternalToOCBgpAfNetwork(vrfName, afiSafi string, global *ocbinds.OpenconfigBgp_Bgp_Global) {
+func (app *BgpApp) convertInternalToOCBgpAfNetwork(afiSafi string, global *ocbinds.OpenconfigBgp_Bgp_Global) {
 	if global.AfiSafis == nil {
 		global.AfiSafis = &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis{}
 	}
@@ -563,11 +551,8 @@ func (app *BgpApp) convertInternalToOCBgpAfNetwork(vrfName, afiSafi string, glob
 		afi.Networks = &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks{}
 	}
 
-	log.Info("Tamo parseando la movidita")
-
 	// Iterate over internal map and populate OC structures
 	for keyStr, v := range app.bgpGlobalsAfNetMap {
-		log.Info("la clave del exito", keyStr)
 
 		parts := strings.Split(keyStr, "|")
 		if len(parts) < 3 {
@@ -678,8 +663,6 @@ func (app *BgpApp) convertDBBgpNeighborAfToInternal(configDB *db.DB, vrfName, ne
 	// Store the DB value in the internal map
 	app.bgpNeighborAfMap[key] = entry
 
-	log.Info("Internal representation")
-
 	// Print the entry contents
 	log.Infof("BGP_NEIGHBOR_AF internal map entry for %s:", key)
 	for field, value := range entry.Field {
@@ -717,8 +700,6 @@ func (app *BgpApp) convertInternalToOCBgpNeighborAf(
 		nb.AfiSafis.AfiSafi = make(
 			map[ocbinds.E_OpenconfigBgpTypes_AFI_SAFI_TYPE]*ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi)
 	}
-
-	log.Info("NEIGHBOR AF 3")
 
 	// Look up internal model for this Neighbor AF
 	key := fmt.Sprintf("%s|%s|%s", vrfName, neighbor, afiSafi)
