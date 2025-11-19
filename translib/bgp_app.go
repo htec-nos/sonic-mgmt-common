@@ -19,6 +19,7 @@ const (
 	BGP_GLOBALS_TABLE          = "BGP_GLOBALS"
 	BGP_GLOBALS_AF_NETWORK_TAB = "BGP_GLOBALS_AF_NETWORK"
 	BGP_NEIGHBOR_TAB           = "BGP_NEIGHBOR"
+	BGP_NEIGHBOR_AF_TAB        = "BGP_NEIGHBOR_AF"
 )
 
 type BgpApp struct {
@@ -34,6 +35,8 @@ type BgpApp struct {
 
 	bgpNeighborTs  *db.TableSpec
 	bgpNeighborMap map[string]db.Value
+	bgpNeighborAfTs  *db.TableSpec
+	bgpNeighborAfMap map[string]db.Value
 
 	vrfName string
 }
@@ -79,10 +82,17 @@ func (app *BgpApp) initialize(data appData) {
 
 	app.bgpNeighborTs = &db.TableSpec{Name: BGP_NEIGHBOR_TAB}
 	app.bgpNeighborMap = make(map[string]db.Value)
+	app.bgpNeighborAfTs = &db.TableSpec{Name: BGP_NEIGHBOR_AF_TAB}
+	app.bgpNeighborAfMap = make(map[string]db.Value)
 }
 
 func (app *BgpApp) getAppRootObject() *ocbinds.OpenconfigBgp_Bgp {
 	deviceObj := (*app.ygotRoot).(*ocbinds.Device)
+	if deviceObj.Bgp == nil {
+		// Allocate BGP root so subsequent code can safely populate children
+		deviceObj.Bgp = &ocbinds.OpenconfigBgp_Bgp{}
+	}
+
 	return deviceObj.Bgp
 }
 
@@ -111,6 +121,8 @@ func (app *BgpApp) translateGet(dbs [db.MaxDB]*db.DB) error {
 		return app.translateGetBgpGlobalsAfNetwork(dbs)
 	case "/openconfig-bgp:bgp/neighbors":
 		return app.translateGetBgpNeighbor(dbs)
+	case "/openconfig-bgp:bgp/neighbors/neighbor{}/afi-safis/afi-safi{}":
+		return app.translateGetBgpNeighborAf(dbs)
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -551,11 +563,8 @@ func (app *BgpApp) convertInternalToOCBgpAfNetwork(afiSafi string, global *ocbin
 		afi.Networks = &ocbinds.OpenconfigBgp_Bgp_Global_AfiSafis_AfiSafi_Networks{}
 	}
 
-	log.Info("Tamo parseando la movidita")
-
 	// Iterate over internal map and populate OC structures
 	for keyStr, v := range app.bgpGlobalsAfNetMap {
-		log.Info("la clave del exito", keyStr)
 
 		parts := strings.Split(keyStr, "|")
 		if len(parts) < 3 {
@@ -694,5 +703,201 @@ func (app *BgpApp) convertInternalToOCBgpNeighbor(neighbors *ocbinds.OpenconfigB
 			neighbor.Config.Description = ygot.String(name)
 			neighbor.State.Description = ygot.String(name)
 		}
+	}
+}
+
+// =============================================================================
+// Helper functions for BGP_NEIGHBOR_AF
+// =============================================================================
+
+// Get related
+
+func (app *BgpApp) translateGetBgpNeighborAf(dbs [db.MaxDB]*db.DB) error {
+
+	configDB := dbs[db.ConfigDB]
+	vrfName := "default"
+	// Extract neighbor IP and AFI-SAFI from the request path
+	neighbor := app.pathInfo.Var("neighbor-address")
+	afiSafi := strings.ToLower(app.pathInfo.Var("afi-safi-name"))
+
+	// Read entries from ConfigDB
+	err := app.convertDBBgpNeighborAfToInternal(configDB, vrfName, neighbor, afiSafi)
+	if err != nil {
+		return err
+	}
+
+	// Convert internal map to YANG (OpenConfig)
+	bgp := app.getAppRootObject()
+	// Ensure Neighbors container exists
+	if bgp.Neighbors == nil {
+		bgp.Neighbors = &ocbinds.OpenconfigBgp_Bgp_Neighbors{}
+	}
+
+	// Build the AF subtree for this neighbor
+	app.convertInternalToOCBgpNeighborAf(vrfName, neighbor, afiSafi, bgp.Neighbors)
+
+	return nil
+}
+
+/*
+ * Reads a single BGP_NEIGHBOR_AF entry from CONFIG_DB for a specific
+ * neighbor and AFI-SAFI, and stores it in the internal map (bgpNeighborAfMap).
+ *
+ * Key format in DB: <vrf>|<neighbor>|<afi-safi>
+ */
+func (app *BgpApp) convertDBBgpNeighborAfToInternal(configDB *db.DB, vrfName, neighbor, afiSafi string) error {
+
+	// Initialize the internal map to store BGP neighbor AF entries
+	app.bgpNeighborAfMap = make(map[string]db.Value)
+
+	// Construct the DB key for the neighbor AFI-SAFI
+	key := fmt.Sprintf("%s|%s|%s", vrfName, neighbor, afiSafi)
+	dbKey := db.Key{Comp: strings.Split(key, "|")}
+
+	// Read entry from CONFIG_DB
+	entry, err := configDB.GetEntry(app.bgpNeighborAfTs, dbKey)
+	if err != nil {
+		log.Errorf("Failed to read CONFIG_DB entry for BGP_NEIGHBOR_AF %s: %v", key, err)
+		return err
+	}
+
+	if !entry.IsPopulated() {
+		return tlerr.NotFound(
+			fmt.Sprintf("BGP_NEIGHBOR_AF entry not found for %s|%s|%s",
+				vrfName, neighbor, afiSafi))
+	}
+
+	// Store the DB value in the internal map
+	app.bgpNeighborAfMap[key] = entry
+
+	// Print the entry contents
+	log.Infof("BGP_NEIGHBOR_AF internal map entry for %s:", key)
+	for field, value := range entry.Field {
+		log.Infof("   %s : %s", field, value)
+	}
+
+	log.Infof("Finished reading BGP_NEIGHBOR_AF entry for %s", key)
+
+	return nil
+}
+
+func (app *BgpApp) convertInternalToOCBgpNeighborAf(
+	vrfName, neighbor, afiSafi string,
+	neighbors *ocbinds.OpenconfigBgp_Bgp_Neighbors,
+) {
+	// Ensure neighbors container exists
+	if neighbors.Neighbor == nil {
+		neighbors.Neighbor = make(map[string]*ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor)
+	}
+
+	// Get or allocate neighbor entry
+	nb, ok := neighbors.Neighbor[neighbor]
+	if !ok {
+		nb = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor{
+			NeighborAddress: ygot.String(neighbor),
+		}
+		neighbors.Neighbor[neighbor] = nb
+	}
+
+	// Ensure afi-safi container exists
+	if nb.AfiSafis == nil {
+		nb.AfiSafis = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis{}
+	}
+	if nb.AfiSafis.AfiSafi == nil {
+		nb.AfiSafis.AfiSafi = make(
+			map[ocbinds.E_OpenconfigBgpTypes_AFI_SAFI_TYPE]*ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi)
+	}
+
+	// Look up internal model for this Neighbor AF
+	key := fmt.Sprintf("%s|%s|%s", vrfName, neighbor, afiSafi)
+	afInternal, ok := app.bgpNeighborAfMap[key]
+	if !ok {
+		// nothing to populate
+		return
+	}
+
+	// Convert afiSafi to OpenConfig enum
+	ocAfi, err := parseAfiSafiType(afiSafi)
+	if err != nil {
+		// unknown AFI-SAFI
+		log.Warningf("Unsupported afi-safi %s: %v", afiSafi, err)
+		return
+	}
+
+	// Create OC afi-safi entry
+	afEntry, exists := nb.AfiSafis.AfiSafi[ocAfi]
+	if !exists {
+		afEntry = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi{
+			AfiSafiName: ocAfi,
+			Config:      &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_Config{},
+			State:       &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_State{},
+		}
+		nb.AfiSafis.AfiSafi[ocAfi] = afEntry
+	}
+
+	// Ensure Config and State are initialized
+	if afEntry.Config == nil {
+		afEntry.Config = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_Config{}
+	}
+	if afEntry.State == nil {
+		afEntry.State = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_State{}
+	}
+
+	cfg := afEntry.Config
+	st := afEntry.State
+
+	// Populate Enabled
+	val := afInternal.Get("admin_status")
+	if val != "" {
+		b := val == "true"
+		cfg.Enabled = ygot.Bool(b)
+		st.Enabled = ygot.Bool(b)
+	}
+
+	//Allocate neighbor ApplyPolicy if needed
+	if afEntry.ApplyPolicy == nil {
+		afEntry.ApplyPolicy = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_ApplyPolicy{
+			Config: &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_ApplyPolicy_Config{},
+			State:  &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_ApplyPolicy_State{},
+		}
+	}
+
+	apc := afEntry.ApplyPolicy.Config
+	aps := afEntry.ApplyPolicy.State
+
+	// Populate policies
+	if val := afInternal.GetList("route_map_in"); len(val) > 0 {
+		apc.ImportPolicy = val
+		aps.ImportPolicy = val
+	}
+
+	if val := afInternal.GetList("route_map_out"); len(val) > 0 {
+		apc.ExportPolicy = val
+		aps.ExportPolicy = val
+	}
+
+	// Allocate neighbor-afi-safi-ext extension if needed
+	if afEntry.NeighborAfiSafiExt == nil {
+		afEntry.NeighborAfiSafiExt = &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_NeighborAfiSafiExt{
+			Config: &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_NeighborAfiSafiExt_Config{},
+			State:  &ocbinds.OpenconfigBgp_Bgp_Neighbors_Neighbor_AfiSafis_AfiSafi_NeighborAfiSafiExt_State{},
+		}
+	}
+
+	extCfg := afEntry.NeighborAfiSafiExt.Config
+	extState := afEntry.NeighborAfiSafiExt.State
+
+	// Map nhself (next-hop-self)
+	if val := afInternal.Get("nhself"); val != "" {
+		b := val == "true"
+		extCfg.NextHopSelf = ygot.Bool(b)
+		extState.NextHopSelf = ygot.Bool(b)
+	}
+
+	// Map rrclient (route-reflector-client)
+	if val := afInternal.Get("rrclient"); val != "" {
+		b := val == "true"
+		extCfg.RouteReflectorClient = ygot.Bool(b)
+		extState.RouteReflectorClient = ygot.Bool(b)
 	}
 }
