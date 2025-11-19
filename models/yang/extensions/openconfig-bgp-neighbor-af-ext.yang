@@ -1,0 +1,80 @@
+module openconfig-bgp-neighbor-af-ext {  
+  yang-version "1";  
+  namespace "http://openconfig.net/yang/bgp/neighbor-af-ext";  
+  prefix "oc-bgp-nbr-af-ext";  
+  
+  import openconfig-bgp { prefix "oc-bgp"; }  
+  import openconfig-extensions { prefix oc-ext; }  
+  
+  organization  
+    "HTEC Group";  
+  
+  contact  
+    "raul.romeron@htecgroup.com";  
+    
+  description  
+    "Extension to add per-AFI-SAFI next-hop-self and route-reflector  
+     client configuration for BGP neighbors";
+
+  oc-ext:openconfig-version "1.0.0";  
+  
+  revision "2025-11-18" {  
+    description  
+      "Initial revision of the BGP next-hop-self extension model.  
+       Adds per-AFI/SAFI configuration for next-hop-self behavior.";  
+    reference  
+      "1.0.0";  
+  }  
+  
+  grouping bgp-neighbor-afi-safi-ext-config {  
+    description  
+      "Extended configuration for BGP neighbor AFI-SAFI";  
+  
+    leaf next-hop-self {  
+      type boolean;  
+      default false;  
+      description  
+        "When true, set next-hop to self for routes advertised to  
+         this neighbor in this address family";  
+    }  
+  
+    leaf route-reflector-client {  
+      type boolean;  
+      default false;  
+      description  
+        "When true, treat this neighbor as a route-reflector client  
+         for this address family";  
+    }  
+  }  
+  
+  grouping bgp-neighbor-afi-safi-ext-top {  
+    description  
+      "Top-level grouping for neighbor AFI-SAFI extensions";  
+  
+    container neighbor-afi-safi-ext {  
+      description  
+        "Extended configuration for neighbor AFI-SAFI";  
+  
+      container config {  
+        description  
+          "Configuration data for neighbor AFI-SAFI extensions";  
+        uses bgp-neighbor-afi-safi-ext-config;  
+      }  
+  
+      container state {  
+        config false;  
+        description  
+          "Operational state for neighbor AFI-SAFI extensions";  
+        uses bgp-neighbor-afi-safi-ext-config;  
+      }  
+    }  
+  }  
+  
+  // Augment neighbor AFI-SAFI container  
+  augment "/oc-bgp:bgp/oc-bgp:neighbors/oc-bgp:neighbor/" +  
+          "oc-bgp:afi-safis/oc-bgp:afi-safi" {  
+    description  
+      "Add extended configuration to neighbor AFI-SAFI";  
+    uses bgp-neighbor-afi-safi-ext-top;  
+  }  
+}
