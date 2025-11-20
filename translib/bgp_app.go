@@ -1,7 +1,6 @@
 package translib
 
 import (
-	"encoding/json"
 	"fmt" // ADD THIS IMPORT
 	"reflect"
 	"strconv" // Better for string to int conversion
@@ -763,15 +762,16 @@ func (app *BgpApp) convertInternalToOCBgpNeighborAf(
 	apc := afEntry.ApplyPolicy.Config
 	aps := afEntry.ApplyPolicy.State
 
-	// Populate policies
-	if val := afInternal.GetList("route_map_in"); len(val) > 0 {
-		apc.ImportPolicy = val
-		aps.ImportPolicy = val
+	// Populate ImportPolicy slice with the single last element
+	if val := afInternal.Field["route_map_in"]; val != "" {
+		apc.ImportPolicy = []string{val}
+		aps.ImportPolicy = []string{val}
 	}
 
-	if val := afInternal.GetList("route_map_out"); len(val) > 0 {
-		apc.ExportPolicy = val
-		aps.ExportPolicy = val
+	// Populate ExportPolicy slice with the single last element
+	if val := afInternal.Field["route_map_out"]; val != "" {
+		apc.ExportPolicy = []string{val}
+		aps.ExportPolicy = []string{val}
 	}
 
 	// Allocate neighbor-afi-safi-ext extension if needed
@@ -870,14 +870,14 @@ func (app *BgpApp) convertOCBgpNeighborAfToInternal(opcode int) ([]db.WatchKeys,
 
 	if afiEntry.ApplyPolicy != nil && afiEntry.ApplyPolicy.Config != nil {
 		if len(afiEntry.ApplyPolicy.Config.ImportPolicy) > 0 {
-			jsonBytes, _ := json.Marshal(afiEntry.ApplyPolicy.Config.ImportPolicy)
-			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_in"] = string(jsonBytes)
+			lastImport := afiEntry.ApplyPolicy.Config.ImportPolicy[len(afiEntry.ApplyPolicy.Config.ImportPolicy)-1]
+			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_in"] = lastImport
 			hasFields = true
 		}
 
 		if len(afiEntry.ApplyPolicy.Config.ExportPolicy) > 0 {
-			jsonBytes, _ := json.Marshal(afiEntry.ApplyPolicy.Config.ExportPolicy)
-			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_out"] = string(jsonBytes)
+			lastExport := afiEntry.ApplyPolicy.Config.ExportPolicy[len(afiEntry.ApplyPolicy.Config.ExportPolicy)-1]
+			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_out"] = lastExport
 			hasFields = true
 		}
 	}
