@@ -869,18 +869,16 @@ func (app *BgpApp) convertOCBgpNeighborAfToInternal(opcode int) ([]db.WatchKeys,
 	}
 
 	if afiEntry.ApplyPolicy != nil && afiEntry.ApplyPolicy.Config != nil {
-		val := db.Value{
-			Field: make(map[string]string),
-			List:  make(map[string][]string),
+		if len(afiEntry.ApplyPolicy.Config.ImportPolicy) > 0 {
+			jsonBytes, _ := json.Marshal(afiEntry.ApplyPolicy.Config.ImportPolicy)
+			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_in"] = string(jsonBytes)
+			hasFields = true
 		}
 
-		if p := afiEntry.ApplyPolicy.Config.ExportPolicy; len(p) > 0 {
-			val.List["route_map_out"] = make([]string, len(p))
-			copy(val.List["route_map_out"], p)
-		}
-		if p := afiEntry.ApplyPolicy.Config.ImportPolicy; len(p) > 0 {
-			val.List["route_map_in"] = make([]string, len(p))
-			copy(val.List["route_map_in"], p)
+		if len(afiEntry.ApplyPolicy.Config.ExportPolicy) > 0 {
+			jsonBytes, _ := json.Marshal(afiEntry.ApplyPolicy.Config.ExportPolicy)
+			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_out"] = string(jsonBytes)
+			hasFields = true
 		}
 	}
 
