@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/Azure/sonic-mgmt-common/cvl"
 	"github.com/Azure/sonic-mgmt-common/translib/db"
 	"github.com/Azure/sonic-mgmt-common/translib/ocbinds"
 	"github.com/Azure/sonic-mgmt-common/translib/tlerr"
@@ -14,7 +15,9 @@ import (
 )
 
 const (
-	ROUTE_MAP_TABLE = "ROUTE_MAP"
+	ROUTE_MAP_TABLE  = "ROUTE_MAP"
+	PREFIX_SET_TABLE = "PREFIX_SET"
+	PREFIX_TABLE     = "PREFIX"
 )
 
 type RoutingPolicyApp struct {
@@ -24,6 +27,12 @@ type RoutingPolicyApp struct {
 
 	routeMapTs  *db.TableSpec
 	routeMapMap map[string]db.Value
+
+	prefixSetTs  *db.TableSpec
+	prefixSetMap map[string]db.Value
+
+	prefixTs  *db.TableSpec
+	prefixMap map[string]db.Value
 }
 
 func init() {
@@ -60,6 +69,12 @@ func (app *RoutingPolicyApp) initialize(data appData) {
 
 	app.routeMapTs = &db.TableSpec{Name: ROUTE_MAP_TABLE}
 	app.routeMapMap = make(map[string]db.Value)
+
+	app.prefixSetTs = &db.TableSpec{Name: PREFIX_SET_TABLE}
+	app.prefixSetMap = make(map[string]db.Value)
+
+	app.prefixTs = &db.TableSpec{Name: PREFIX_TABLE}
+	app.prefixMap = make(map[string]db.Value)
 }
 
 func (app *RoutingPolicyApp) getAppRootObject() *ocbinds.OpenconfigRoutingPolicy_RoutingPolicy {
@@ -88,6 +103,8 @@ func (app *RoutingPolicyApp) translateGet(dbs [db.MaxDB]*db.DB) error {
 	switch path {
 	case "/openconfig-routing-policy:routing-policy/policy-definitions":
 		return app.translateGetRouteMap(dbs)
+	case "/openconfig-routing-policy:routing-policy/defined-sets/prefix-sets":
+		return app.translateGetPrefixSet(dbs)
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -166,6 +183,8 @@ func (app *RoutingPolicyApp) translateCRUDCommon(configDB *db.DB, opcode int) ([
 	switch path {
 	case "/openconfig-routing-policy:routing-policy/policy-definitions/policy-definition{}/statements/statement{}":
 		return app.convertOCRouteMapToInternal(opcode)
+	case "/openconfig-routing-policy:routing-policy/defined-sets/prefix-sets/prefix-set{}":
+		return app.convertOCPrefixSetToInternal(opcode)
 	default:
 		var keys []db.WatchKeys
 		return keys, tlerr.NotSupported("Path not supported")
@@ -177,6 +196,16 @@ func (app *RoutingPolicyApp) processCRUDCommon(configDB *db.DB, opcode int) erro
 	switch path {
 	case "/openconfig-routing-policy:routing-policy/policy-definitions/policy-definition{}/statements/statement{}":
 		return app.setDataInConfigDb(configDB, app.routeMapTs, app.routeMapMap, opcode)
+	case "/openconfig-routing-policy:routing-policy/defined-sets/prefix-sets/prefix-set{}":
+		if opcode == DELETE {
+			return app.setDataInConfigDb(configDB, app.prefixSetTs, app.prefixSetMap, opcode)
+		} else {
+			err := app.setDataInConfigDb(configDB, app.prefixSetTs, app.prefixSetMap, opcode)
+			if err != nil {
+				return err
+			}
+			return app.setDataInConfigDb(configDB, app.prefixTs, app.prefixMap, opcode)
+		}
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -218,6 +247,30 @@ func (app *RoutingPolicyApp) setDataInConfigDb(configDB *db.DB, ts *db.TableSpec
 			if !existingEntry.IsPopulated() {
 				return tlerr.NotFound(fmt.Sprintf("%s entry '%v' not found", ts.Name, key))
 			}
+
+			cvlSess, cvlErr := configDB.NewValidationSession()
+			if cvlErr != nil {
+				return fmt.Errorf("failed to open CVL session: %v", cvlErr)
+			}
+			defer cvl.ValidationSessClose(cvlSess)
+
+			redisKey := ts.Name + "|" + key
+
+			depEntries := cvlSess.GetDepDataForDelete(redisKey)
+
+			// Delete dependent entries first
+			for _, depData := range depEntries {
+				for depKey := range depData.Entry {
+					parts := strings.SplitN(depKey, "|", 2)
+					if len(parts) == 2 {
+						depTs := &db.TableSpec{Name: parts[0]}
+						depKeyComps := strings.Split(parts[1], "|")
+						configDB.DeleteEntry(depTs, db.Key{Comp: depKeyComps})
+					}
+				}
+			}
+
+			// Finally delete the parent entry
 			err = configDB.DeleteEntry(ts, k)
 
 		default:
@@ -434,5 +487,252 @@ func (app *RoutingPolicyApp) convertInternalToOCRouteMap(policyDefs *ocbinds.Ope
 
 		// Add statement to policy definition
 		polDef.Statements.Statement[seqNum] = stmt
+	}
+}
+
+// =============================================================================
+// Helper functions for PREFIX_SET
+// =============================================================================
+
+// CRUD related
+
+func (app *RoutingPolicyApp) convertOCPrefixSetToInternal(opcode int) ([]db.WatchKeys, error) {
+	var keys []db.WatchKeys
+
+	prefixSetName := app.pathInfo.Var("name")
+
+	if opcode == DELETE {
+		// For DELETE, populate maps with empty values
+		app.prefixSetMap = make(map[string]db.Value)
+		app.prefixSetMap[prefixSetName] = db.Value{Field: map[string]string{}}
+
+		// Note: For DELETE, be deleting PREFIX_SET, also delted the child PREFIX entries
+		app.prefixMap = make(map[string]db.Value)
+
+		// Generate watch keys
+		keys = append(keys, db.WatchKeys{
+			Ts:  app.prefixSetTs,
+			Key: &db.Key{Comp: []string{prefixSetName}},
+		})
+		return keys, nil
+	}
+
+	rp := app.getAppRootObject()
+
+	if rp.DefinedSets == nil || rp.DefinedSets.PrefixSets == nil || rp.DefinedSets.PrefixSets.PrefixSet == nil {
+		return keys, tlerr.NotFound("Prefix sets not found in payload")
+	}
+
+	prefixSet, exists := rp.DefinedSets.PrefixSets.PrefixSet[prefixSetName]
+	if !exists {
+		return keys, tlerr.NotFound(fmt.Sprintf("Prefix set '%s' not found", prefixSetName))
+	}
+
+	// Initialize maps
+	app.prefixSetMap = make(map[string]db.Value)
+	app.prefixMap = make(map[string]db.Value)
+
+	// Create PREFIX_SET entry
+	prefixSetData := db.Value{Field: make(map[string]string)}
+	if prefixSet.Config != nil {
+		if prefixSet.Config.Mode == ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Config_Mode_IPV4 {
+			prefixSetData.Field["mode"] = "IPv4"
+		} else if prefixSet.Config.Mode == ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Config_Mode_IPV6 {
+			prefixSetData.Field["mode"] = "IPv6"
+		}
+	}
+	app.prefixSetMap[prefixSetName] = prefixSetData
+
+	// Create PREFIX entries
+	if prefixSet.Prefixes != nil && prefixSet.Prefixes.Prefix != nil {
+		for _, prefix := range prefixSet.Prefixes.Prefix {
+			var ipPrefix, maskLengthRange, action string
+
+			if prefix.Config != nil {
+				if prefix.Config.IpPrefix != nil {
+					ipPrefix = *prefix.Config.IpPrefix
+				}
+				if prefix.Config.MasklengthRange != nil {
+					maskLengthRange = *prefix.Config.MasklengthRange
+				} else {
+					maskLengthRange = "exact"
+				}
+				if prefix.Config.Action == ocbinds.E_OpenconfigRoutingPolicyExt_PolicyResultType(1) { // ACCEPT_ROUTE
+					action = "permit"
+				} else if prefix.Config.Action == ocbinds.E_OpenconfigRoutingPolicyExt_PolicyResultType(2) { // REJECT_ROUTE
+					action = "deny"
+				}
+			}
+
+			// Create composite key: prefixSetName|ipPrefix|maskLengthRange
+			prefixDbKey := fmt.Sprintf("%s|%s|%s", prefixSetName, ipPrefix, maskLengthRange)
+
+			prefixData := db.Value{Field: make(map[string]string)}
+			prefixData.Field["action"] = action
+
+			app.prefixMap[prefixDbKey] = prefixData
+
+			// Generate watch key for each prefix
+			keys = append(keys, db.WatchKeys{
+				Ts:  app.prefixTs,
+				Key: &db.Key{Comp: strings.Split(prefixDbKey, "|")},
+			})
+		}
+	}
+
+	// Generate watch key for prefix set
+	keys = append(keys, db.WatchKeys{
+		Ts:  app.prefixSetTs,
+		Key: &db.Key{Comp: []string{prefixSetName}},
+	})
+
+	return keys, nil
+}
+
+// Get related
+
+func (app *RoutingPolicyApp) translateGetPrefixSet(dbs [db.MaxDB]*db.DB) error {
+	configDB := dbs[db.ConfigDB]
+
+	err := app.convertDBPrefixSetToInternal(configDB)
+	if err != nil {
+		return err
+	}
+
+	rp := app.getAppRootObject()
+	ygot.BuildEmptyTree(rp.DefinedSets)
+	app.convertInternalToOCPrefixSet(rp.DefinedSets)
+	return nil
+}
+
+func (app *RoutingPolicyApp) convertDBPrefixSetToInternal(configDB *db.DB) error {
+	app.prefixSetMap = make(map[string]db.Value)
+
+	// Get PREFIX_SET entries
+	entries, err := configDB.GetKeys(app.prefixSetTs)
+	if err != nil {
+		return err
+	}
+
+	if len(entries) == 0 {
+		return tlerr.NotFound("PREFIX_SET configuration not found")
+	}
+
+	for _, k := range entries {
+		val, _ := configDB.GetEntry(app.prefixSetTs, k)
+		app.prefixSetMap[strings.Join(k.Comp, "|")] = val
+	}
+
+	// Get PREFIX entries
+	entries, err = configDB.GetKeys(app.prefixTs)
+	if err != nil {
+		return err
+	}
+
+	if len(entries) == 0 {
+		return tlerr.NotFound("PREFIX_SET configuration not found")
+	}
+
+	for _, k := range entries {
+		val, _ := configDB.GetEntry(app.prefixTs, k)
+		app.prefixMap[strings.Join(k.Comp, "|")] = val
+	}
+
+	return nil
+}
+
+func (app *RoutingPolicyApp) convertInternalToOCPrefixSet(definedSets *ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets) {
+	// Initialize PrefixSets container if needed
+	if definedSets.PrefixSets == nil {
+		definedSets.PrefixSets = &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets{}
+	}
+	if definedSets.PrefixSets.PrefixSet == nil {
+		definedSets.PrefixSets.PrefixSet = make(map[string]*ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet)
+	}
+
+	// First, create all prefix sets from PREFIX_SET table
+	for prefixSetName, v := range app.prefixSetMap {
+		prefixSet := &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet{
+			Name: ygot.String(prefixSetName),
+			Config: &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Config{
+				Name: ygot.String(prefixSetName),
+			},
+			State: &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_State{
+				Name: ygot.String(prefixSetName),
+			},
+		}
+
+		// Get mode from PREFIX_SET entry
+		mode := strings.ToLower(v.Get("mode"))
+		if mode != "" {
+			// Map mode to OpenConfig enum
+			// "ipv4" -> IPV4, "ipv6" -> IPV6
+			var modeEnum ocbinds.E_OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Config_Mode
+			if mode == "ipv4" {
+				modeEnum = ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Config_Mode_IPV4
+			} else if mode == "ipv6" {
+				modeEnum = ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Config_Mode_IPV6
+			}
+
+			// Set mode in both config and state
+			if modeEnum != 0 {
+				prefixSet.Config.Mode = modeEnum
+				prefixSet.State.Mode = modeEnum
+			}
+		}
+		// Initialize Prefixes container
+		prefixSet.Prefixes = &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes{}
+		prefixSet.Prefixes.Prefix = make(map[ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes_Prefix_Key]*ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes_Prefix)
+
+		definedSets.PrefixSets.PrefixSet[prefixSetName] = prefixSet
+	}
+
+	// Now process PREFIX entries - only for prefix sets that exist in PREFIX_SET
+	for keyStr, data := range app.prefixMap {
+		parts := strings.Split(keyStr, "|")
+		if len(parts) < 3 {
+			continue
+		}
+		prefixSetName := parts[0]
+		ipPrefix := parts[1]
+		masklengthRange := parts[2]
+
+		var action ocbinds.E_OpenconfigRoutingPolicyExt_PolicyResultType
+		if data.Get("action") == "permit" {
+			action = ocbinds.E_OpenconfigRoutingPolicyExt_PolicyResultType(1) // ACCEPT_ROUTE
+		} else if data.Get("action") == "deny" {
+			action = ocbinds.E_OpenconfigRoutingPolicyExt_PolicyResultType(2) // REJECT_ROUTE
+		}
+
+		// Only process if this prefix belongs to a defined prefix set
+		prefixSet, exists := definedSets.PrefixSets.PrefixSet[prefixSetName]
+		if !exists {
+			// Skip prefixes that don't belong to any defined prefix set
+			continue
+		}
+
+		// Create prefix key
+		prefixKey := ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes_Prefix_Key{
+			IpPrefix:        ipPrefix,
+			MasklengthRange: masklengthRange,
+		}
+
+		// Create prefix entry
+		prefix := &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes_Prefix{
+			IpPrefix:        ygot.String(ipPrefix),
+			MasklengthRange: ygot.String(masklengthRange),
+			Config: &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes_Prefix_Config{
+				IpPrefix:        ygot.String(ipPrefix),
+				MasklengthRange: ygot.String(masklengthRange),
+				Action:          action,
+			},
+			State: &ocbinds.OpenconfigRoutingPolicy_RoutingPolicy_DefinedSets_PrefixSets_PrefixSet_Prefixes_Prefix_State{
+				IpPrefix:        ygot.String(ipPrefix),
+				MasklengthRange: ygot.String(masklengthRange),
+			},
+		}
+
+		// Add prefix to the prefix set
+		prefixSet.Prefixes.Prefix[prefixKey] = prefix
 	}
 }

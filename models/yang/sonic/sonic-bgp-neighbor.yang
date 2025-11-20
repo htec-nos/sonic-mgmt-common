@@ -67,12 +67,12 @@ module sonic-bgp-neighbor {
                 leaf neighbor {
                     type union {
                         type inet:ip-address;
-                        type leafref {
-                            path "/port:sonic-port/port:PORT/port:PORT_LIST/port:name";
-                        }
-                        type leafref {
-                            path "/lag:sonic-portchannel/lag:PORTCHANNEL/lag:PORTCHANNEL_LIST/lag:name";
-                        }
+                        // type leafref {
+                        //    path "/port:sonic-port/port:PORT/port:PORT_LIST/port:name";
+                        //}
+                        //type leafref {
+                        //    path "/lag:sonic-portchannel/lag:PORTCHANNEL/lag:PORTCHANNEL_LIST/lag:name";
+                        //}
                        // Comment VLAN leaf reference here until libyang back-links issue is resolved and use VLAN string pattern
                        // type leafref {
                        //     path "/vlan:sonic-vlan/vlan:VLAN/vlan:VLAN_LIST/vlan:name";
