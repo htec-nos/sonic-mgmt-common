@@ -1,6 +1,7 @@
 package translib
 
 import (
+	"encoding/json"
 	"fmt" // ADD THIS IMPORT
 	"reflect"
 	"strconv" // Better for string to int conversion
@@ -197,6 +198,8 @@ func (app *BgpApp) translateCRUDCommon(configDB *db.DB, opcode int) ([]db.WatchK
 	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
 		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
 		return app.convertOCBgpGlobalsAfNetworkToInternal(opcode)
+	case "/openconfig-bgp:bgp/neighbors/neighbor{}/afi-safis/afi-safi{}":
+		return app.convertOCBgpNeighborAfToInternal(opcode)
 	default:
 		var keys []db.WatchKeys
 		return keys, tlerr.NotSupported("Path not supported")
@@ -211,6 +214,8 @@ func (app *BgpApp) processCRUDCommon(configDB *db.DB, opcode int) error {
 	case "/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}",
 		"/openconfig-bgp:bgp/global/afi-safis/afi-safi{}/openconfig-bgp-network-ext:networks/network{}/config":
 		return app.setBgpDataInConfigDb(configDB, app.bgpGlobalsAfNetTs, app.bgpGlobalsAfNetMap, opcode)
+	case "/openconfig-bgp:bgp/neighbors/neighbor{}/afi-safis/afi-safi{}":
+		return app.setBgpDataInConfigDb(configDB, app.bgpNeighborAfTs, app.bgpNeighborAfMap, opcode)
 	default:
 		return tlerr.NotSupported("Path not supported")
 	}
@@ -742,7 +747,7 @@ func (app *BgpApp) convertInternalToOCBgpNeighborAf(
 	// Populate Enabled
 	val := afInternal.Get("admin_status")
 	if val != "" {
-		b := val == "true"
+		b := val == "up"
 		cfg.Enabled = ygot.Bool(b)
 		st.Enabled = ygot.Bool(b)
 	}
@@ -793,4 +798,121 @@ func (app *BgpApp) convertInternalToOCBgpNeighborAf(
 		extCfg.RouteReflectorClient = ygot.Bool(b)
 		extState.RouteReflectorClient = ygot.Bool(b)
 	}
+}
+
+// CRUD related
+
+func (app *BgpApp) convertOCBgpNeighborAfToInternal(opcode int) ([]db.WatchKeys, error) {
+
+	var keys []db.WatchKeys
+
+	// Path variables
+	neighbor := app.pathInfo.Var("neighbor-address")
+	afiSafi := strings.ToLower(app.pathInfo.Var("afi-safi-name"))
+	vrf := app.vrfName
+
+	// Build DB key string and db.Key
+	dbKeyStr := fmt.Sprintf("%s|%s|%s", vrf, neighbor, afiSafi)
+	dbKey := db.Key{Comp: []string{vrf, neighbor, afiSafi}}
+
+	// DELETE: just populate map with key and empty entry
+	if opcode == DELETE {
+		app.bgpNeighborAfMap = make(map[string]db.Value)
+		app.bgpNeighborAfMap[dbKeyStr] = db.Value{Field: map[string]string{}}
+
+		keys = append(keys, db.WatchKeys{
+			Ts:  app.bgpNeighborAfTs,
+			Key: &dbKey})
+		return keys, nil
+	}
+
+	// For CREATE / REPLACE / UPDATE: parse YANG payload
+	bgp := app.getAppRootObject()
+	if bgp == nil || bgp.Neighbors == nil {
+		return keys, tlerr.NotFound("BGP neighbors not present in YANG payload")
+	}
+
+	// Find neighbor list entry
+	nbEntry, ok := bgp.Neighbors.Neighbor[neighbor]
+	if !ok {
+		return keys, tlerr.NotFound("neighbor entry not found in YANG payload")
+	}
+
+	// Find AFI-SAFI element in neighbor
+	ocAfi, err := parseAfiSafiType(afiSafi)
+	if err != nil {
+		return keys, tlerr.InvalidArgs(fmt.Sprintf("invalid afi-safi name: %s", afiSafi))
+	}
+
+	if nbEntry.AfiSafis == nil || nbEntry.AfiSafis.AfiSafi == nil {
+		return keys, tlerr.NotFound("afi-safi container not present in YANG payload")
+	}
+
+	afiEntry, exists := nbEntry.AfiSafis.AfiSafi[ocAfi]
+	if !exists {
+		return keys, tlerr.NotFound("afi-safi entry not present in YANG payload")
+	}
+
+	app.bgpNeighborAfMap = make(map[string]db.Value)
+	app.bgpNeighborAfMap[dbKeyStr] = db.Value{Field: map[string]string{}}
+
+	app.bgpNeighborAfMap := db.Value{  
+		Field: make(map[string]string),  
+		List:  make(map[string][]string),  
+	}  
+
+	hasFields := false
+	if afiEntry.Config != nil && afiEntry.Config.Enabled != nil {
+		log.Infof("ADMIN_STATUS PATCHED")
+		if *afiEntry.Config.Enabled {
+			app.bgpNeighborAfMap[dbKeyStr].Field["admin_status"] = "up"
+		} else {
+			app.bgpNeighborAfMap[dbKeyStr].Field["admin_status"] = "down"
+		}
+
+		hasFields = true
+	}
+
+	if afiEntry.ApplyPolicy != nil && afiEntry.ApplyPolicy.Config != nil {
+		if len(afiEntry.ApplyPolicy.Config.ImportPolicy) > 0 {
+			jsonBytes, _ := json.Marshal(afiEntry.ApplyPolicy.Config.ImportPolicy)
+			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_in"] = string(jsonBytes)
+			hasFields = true
+		}
+
+		if len(afiEntry.ApplyPolicy.Config.ExportPolicy) > 0 {
+			jsonBytes, _ := json.Marshal(afiEntry.ApplyPolicy.Config.ExportPolicy)
+			app.bgpNeighborAfMap[dbKeyStr].Field["route_map_out"] = string(jsonBytes)
+			hasFields = true
+		}
+	}
+
+	if afiEntry.NeighborAfiSafiExt != nil && afiEntry.NeighborAfiSafiExt.Config != nil {
+		if afiEntry.NeighborAfiSafiExt.Config.NextHopSelf != nil {
+			app.bgpNeighborAfMap[dbKeyStr].Field["nhself"] = boolToDBString(afiEntry.NeighborAfiSafiExt.Config.NextHopSelf)
+			hasFields = true
+		}
+		if afiEntry.NeighborAfiSafiExt.Config.RouteReflectorClient != nil {
+			app.bgpNeighborAfMap[dbKeyStr].Field["rrclient"] = boolToDBString(afiEntry.NeighborAfiSafiExt.Config.RouteReflectorClient)
+			hasFields = true
+		}
+	}
+
+	if !hasFields {
+		app.bgpNeighborAfMap[dbKeyStr].Field["NULL"] = "NULL"
+	}
+
+	keys = append(keys, db.WatchKeys{
+		Ts:  app.bgpNeighborAfTs,
+		Key: &db.Key{Comp: []string{app.vrfName, neighbor, afiSafi}},
+	})
+
+	return keys, nil
+}
+
+func boolToDBString(b *bool) string {
+	if b != nil && *b {
+		return "true"
+	}
+	return "false"
 }
